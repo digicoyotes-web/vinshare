@@ -1,101 +1,16 @@
 import crypto from 'node:crypto';
 import express from 'express';
 
-export type SmsDirection = 'outbound' | 'inbound';
-export type SmsPurpose =
-  | 'client_mobile_verification'
-  | 'login_mfa'
-  | 'proposal_approval'
-  | 'loi_acceptance'
-  | 'agreement_signature'
-  | 'invoice_approval'
-  | 'payment_confirmation'
-  | 'project_activation'
-  | 'inbound_reply';
-
-export type SmsDeliveryStatus = 'queued' | 'sent' | 'delivered' | 'received';
-export type SmsVerificationStatus = 'pending' | 'verified' | 'expired' | 'failed' | 'not_required';
-
-export interface SmsRecord {
-  id: string;
-  direction: SmsDirection;
-  from: string;
-  to: string;
-  recipientName: string;
-  purpose: SmsPurpose;
-  entityType: 'client' | 'proposal' | 'loi' | 'agreement' | 'project' | 'invoice' | 'payment' | 'user' | 'system';
-  entityId: string;
-  entityLabel: string;
-  body: string;
-  otpHash?: string;
-  otpSalt?: string;
-  deliveryStatus: SmsDeliveryStatus;
-  verificationStatus: SmsVerificationStatus;
-  requiresVerification: boolean;
-  attempts: number;
-  maxAttempts: number;
-  expiresAt: string | null;
-  createdAt: string;
-  deliveredAt: string | null;
-  receivedAt: string | null;
-  verifiedAt: string | null;
-  verifiedMethod: 'otp_entry' | 'inbound_sms_reply' | 'webhook' | null;
-  carrierRef: string;
-  carrierMode: 'sandbox-carrier' | 'twilio-rest';
-}
-
-export interface VerifiedPhoneEntry {
-  phone: string;
-  verifiedAt: string;
-  messageId: string;
-  method: 'otp_entry' | 'inbound_sms_reply' | 'webhook';
-  holderName: string;
-}
-
-export interface VerifiedEntityEntry {
-  entityId: string;
-  entityType: string;
-  entityLabel: string;
-  phone: string;
-  verifiedAt: string;
-  messageId: string;
-  purpose: SmsPurpose;
-  method: 'otp_entry' | 'inbound_sms_reply' | 'webhook';
-}
-
-export interface SmsAuditEvent {
-  id: string;
-  timestamp: string;
-  messageId: string;
-  phone: string;
-  event: string;
-  detail: string;
-  status: 'info' | 'success' | 'warning' | 'error';
-}
-
-interface ChallengeTokenPayload {
-  id: string;
-  to: string;
-  entityType: SmsRecord['entityType'];
-  entityId: string;
-  entityLabel: string;
-  purpose: SmsPurpose;
-  otpHash: string;
-  otpSalt: string;
-  expiresAt: string;
-  receivedAt: string;
-}
-
 const HMAC_SECRET =
   process.env.SMS_SIGNING_SECRET || 'fm-erp-sms-gateway-hmac-key-2025';
 
-function signChallengeToken(payload: ChallengeTokenPayload): string {
+function signChallengeToken(payload) {
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const sig = crypto.createHmac('sha256', HMAC_SECRET).update(encoded).digest('base64url');
   return `${encoded}.${sig}`;
 }
 
-function verifyChallengeToken(token: string): ChallengeTokenPayload | null {
+function verifyChallengeToken(token) {
   try {
     const [encoded, sig] = token.split('.');
     if (!encoded || !sig) return null;
@@ -106,13 +21,13 @@ function verifyChallengeToken(token: string): ChallengeTokenPayload | null {
     const a = Buffer.from(sig, 'utf8');
     const b = Buffer.from(expectedSig, 'utf8');
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-    return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as ChallengeTokenPayload;
+    return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
   } catch {
     return null;
   }
 }
 
-function normalizePhone(raw: string): string {
+function normalizePhone(raw) {
   const trimmed = (raw || '').trim();
   const digits = trimmed.replace(/[^\d+]/g, '');
   if (!digits) return '';
@@ -122,31 +37,26 @@ function normalizePhone(raw: string): string {
   return `+${digits}`;
 }
 
-function hashOtp(code: string, salt: string): string {
+function hashOtp(code, salt) {
   return crypto.createHash('sha256').update(`${salt}:${code}`).digest('hex');
 }
 
-function verifyOtpHash(code: string, salt: string, expectedHash: string): boolean {
+function verifyOtpHash(code, salt, expectedHash) {
   const actual = Buffer.from(hashOtp(code.trim(), salt), 'hex');
   const expected = Buffer.from(expectedHash, 'hex');
   if (actual.length !== expected.length) return false;
   return crypto.timingSafeEqual(actual, expected);
 }
 
-function generateId(prefix: string): string {
+function generateId(prefix) {
   return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
 }
 
-function generateCarrierRef(): string {
+function generateCarrierRef() {
   return `DLT-${crypto.randomInt(100000000, 999999999)}`;
 }
 
-function buildSmsBody(
-  purpose: SmsPurpose,
-  entityLabel: string,
-  otpCode?: string,
-  customMessage?: string
-): string {
+function buildSmsBody(purpose, entityLabel, otpCode, customMessage) {
   if (customMessage && customMessage.trim()) {
     return otpCode
       ? `${customMessage.trim()} Verification OTP: ${otpCode}. Valid for 5 mins.`
@@ -174,18 +84,12 @@ function buildSmsBody(
   }
 }
 
-const smsMessages: SmsRecord[] = [];
-const verifiedPhones = new Map<string, VerifiedPhoneEntry>();
-const verifiedEntities = new Map<string, VerifiedEntityEntry>();
-const smsAuditEvents: SmsAuditEvent[] = [];
+const smsMessages = [];
+const verifiedPhones = new Map();
+const verifiedEntities = new Map();
+const smsAuditEvents = [];
 
-function pushAudit(
-  messageId: string,
-  phone: string,
-  event: string,
-  detail: string,
-  status: SmsAuditEvent['status']
-) {
+function pushAudit(messageId, phone, event, detail, status) {
   smsAuditEvents.unshift({
     id: generateId('AUD'),
     timestamp: new Date().toISOString(),
@@ -205,7 +109,7 @@ function ensureSeeded() {
 
   const salt1 = crypto.randomBytes(16).toString('hex');
   const code1 = '482910';
-  const msg1: SmsRecord = {
+  const msg1 = {
     id: 'SMS-2025-1001',
     direction: 'outbound',
     from: 'FM-ERP',
@@ -235,7 +139,7 @@ function ensureSeeded() {
 
   const salt2 = crypto.randomBytes(16).toString('hex');
   const code2 = '739204';
-  const msg2: SmsRecord = {
+  const msg2 = {
     id: 'SMS-2025-1002',
     direction: 'outbound',
     from: 'FM-ERP',
@@ -265,7 +169,7 @@ function ensureSeeded() {
 
   const salt3 = crypto.randomBytes(16).toString('hex');
   const code3 = '615839';
-  const msg3: SmsRecord = {
+  const msg3 = {
     id: 'SMS-2025-1003',
     direction: 'outbound',
     from: 'FM-ERP',
@@ -297,7 +201,7 @@ function ensureSeeded() {
 
   verifiedPhones.set(msg1.to, {
     phone: msg1.to,
-    verifiedAt: msg1.verifiedAt!,
+    verifiedAt: msg1.verifiedAt,
     messageId: msg1.id,
     method: 'otp_entry',
     holderName: msg1.recipientName,
@@ -307,7 +211,7 @@ function ensureSeeded() {
     entityType: msg1.entityType,
     entityLabel: msg1.entityLabel,
     phone: msg1.to,
-    verifiedAt: msg1.verifiedAt!,
+    verifiedAt: msg1.verifiedAt,
     messageId: msg1.id,
     purpose: msg1.purpose,
     method: 'otp_entry',
@@ -315,7 +219,7 @@ function ensureSeeded() {
 
   verifiedPhones.set(msg2.to, {
     phone: msg2.to,
-    verifiedAt: msg2.verifiedAt!,
+    verifiedAt: msg2.verifiedAt,
     messageId: msg2.id,
     method: 'otp_entry',
     holderName: msg2.recipientName,
@@ -325,7 +229,7 @@ function ensureSeeded() {
     entityType: msg2.entityType,
     entityLabel: msg2.entityLabel,
     phone: msg2.to,
-    verifiedAt: msg2.verifiedAt!,
+    verifiedAt: msg2.verifiedAt,
     messageId: msg2.id,
     purpose: msg2.purpose,
     method: 'otp_entry',
@@ -336,7 +240,7 @@ function ensureSeeded() {
   pushAudit(msg3.id, msg3.to, 'SMS Received', 'LOI acceptance SMS delivered & received on recipient handset', 'info');
 }
 
-async function dispatchOptionalTwilioSms(to: string, body: string): Promise<'twilio-rest' | 'sandbox-carrier'> {
+async function dispatchOptionalTwilioSms(to, body) {
   const sid = process.env.TWILIO_ACCOUNT_SID;
   const token = process.env.TWILIO_AUTH_TOKEN;
   const from = process.env.TWILIO_FROM_NUMBER;
@@ -435,7 +339,7 @@ export function createSmsApiApp() {
       ? new Date(now.getTime() + Math.max(1, Number(ttlMinutes) || 5) * 60 * 1000).toISOString()
       : null;
 
-    const record: SmsRecord = {
+    const record = {
       id: generateId('SMS'),
       direction: 'outbound',
       from: 'FM-ERP',
@@ -526,7 +430,7 @@ export function createSmsApiApp() {
     res.json({ messages: filtered });
   });
 
-  const handleInboundReceive = (req: express.Request, res: express.Response) => {
+  const handleInboundReceive = (req, res) => {
     expireStaleChallenges();
     const fromRaw = req.body?.from || req.body?.From || '';
     const toRaw = req.body?.to || req.body?.To || 'FM-ERP';
@@ -538,7 +442,7 @@ export function createSmsApiApp() {
     }
 
     const now = new Date().toISOString();
-    const inboundRecord: SmsRecord = {
+    const inboundRecord = {
       id: generateId('INB'),
       direction: 'inbound',
       from,
@@ -568,8 +472,8 @@ export function createSmsApiApp() {
     pushAudit(inboundRecord.id, from, 'Inbound SMS Received', `Received reply: "${bodyText}"`, 'info');
 
     const codeMatch = bodyText.match(/\b(\d{6})\b/);
-    let matchedVerification: SmsRecord | null = null;
-    let verificationOutcome: 'verified' | 'invalid_code' | 'no_pending' = 'no_pending';
+    let matchedVerification = null;
+    let verificationOutcome = 'no_pending';
 
     if (codeMatch) {
       const code = codeMatch[1];
@@ -616,7 +520,7 @@ export function createSmsApiApp() {
             'success'
           );
 
-          const ackSms: SmsRecord = {
+          const ackSms = {
             id: generateId('SMS'),
             direction: 'outbound',
             from: 'FM-ERP',
@@ -684,7 +588,7 @@ export function createSmsApiApp() {
       return res.status(400).json({ verified: false, error: 'Please enter a valid 6-digit SMS verification code.' });
     }
 
-    let target: SmsRecord | undefined;
+    let target;
     if (messageId) {
       target = smsMessages.find((m) => m.id === messageId);
     } else if (normalized || entityId) {
@@ -698,7 +602,6 @@ export function createSmsApiApp() {
       );
     }
 
-    // Stateless signed challengeToken fallback (supports Vercel serverless cold instances)
     if (!target && typeof challengeToken === 'string' && challengeToken) {
       const tokenData = verifyChallengeToken(challengeToken);
       if (!tokenData) {
@@ -855,3 +758,6 @@ export function createSmsApiApp() {
 
   return app;
 }
+
+const app = createSmsApiApp();
+export default app;

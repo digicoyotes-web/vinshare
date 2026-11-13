@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
-import { createSmsApiApp } from './smsApp.ts';
+import { createSmsApiApp } from './api/index.js';
 
 dotenv.config();
 
