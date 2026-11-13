@@ -279,7 +279,7 @@ function expireStaleChallenges() {
   }
 }
 
-export function createSmsApiApp() {
+function createSmsApiApp() {
   ensureSeeded();
   const app = express();
   app.use(express.json());
