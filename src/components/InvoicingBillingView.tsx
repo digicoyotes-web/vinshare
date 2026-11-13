@@ -1,0 +1,360 @@
+import React, { useState } from 'react';
+import { CheckCircle2, Plus, Printer, Receipt, ShieldCheck } from 'lucide-react';
+import type { ClientRecord, InvoiceRecord, ProjectRecord } from '../types/erp';
+import { formatInrFull } from '../utils/formatters';
+import type { SmsVerifyModalContext } from './SmsVerifyModal';
+
+interface InvoicingBillingViewProps {
+  clients: ClientRecord[];
+  projects: ProjectRecord[];
+  invoices: InvoiceRecord[];
+  onCreateInvoice: (invoice: InvoiceRecord) => void;
+  onTriggerSmsVerify: (ctx: SmsVerifyModalContext) => void;
+}
+
+export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
+  clients,
+  projects,
+  invoices,
+  onCreateInvoice,
+  onTriggerSmsVerify,
+}) => {
+  const [selectedId, setSelectedId] = useState(invoices[0]?.id || '');
+  const [showNewModal, setShowNewModal] = useState(false);
+
+  const [newProjectId, setNewProjectId] = useState(projects[0]?.id || '');
+  const [billingPeriod, setBillingPeriod] = useState('Feb 2025');
+  const [poNumber, setPoNumber] = useState('PO/USQ/2025/004');
+  const [placeOfSupply, setPlaceOfSupply] = useState<'Intra-State' | 'Inter-State'>('Intra-State');
+  const [extraAmount, setExtraAmount] = useState('0');
+  const [deductions, setDeductions] = useState('0');
+
+  const active = invoices.find((i) => i.id === selectedId) || invoices[0];
+
+  const handleGenerateInvoice = (e: React.FormEvent) => {
+    e.preventDefault();
+    const project = projects.find((p) => p.id === newProjectId) || projects[0];
+    const client = clients.find((c) => c.id === project.clientId);
+    const baseAmt = Math.round(project.monthlyBilling);
+    const extra = Number(extraAmount) || 0;
+    const ded = Number(deductions) || 0;
+    const taxableValue = Math.max(0, baseAmt + extra - ded);
+    const cgst = placeOfSupply === 'Intra-State' ? Math.round(taxableValue * 0.09) : 0;
+    const sgst = placeOfSupply === 'Intra-State' ? Math.round(taxableValue * 0.09) : 0;
+    const igst = placeOfSupply === 'Inter-State' ? Math.round(taxableValue * 0.18) : 0;
+    const totalAmount = taxableValue + cgst + sgst + igst;
+    const nextNum = `INV-${String(1461 + invoices.length).padStart(5, '0')}`;
+
+    const invoice: InvoiceRecord = {
+      id: nextNum,
+      invoiceNumber: nextNum,
+      projectId: project.id,
+      clientId: project.clientId,
+      clientName: project.clientName,
+      gstin: client?.gstin || '27AABCU9603R1ZM',
+      placeOfSupply,
+      billingPeriod,
+      poNumber,
+      issueDate: new Date().toISOString().slice(0, 10),
+      dueDate: '2025-02-28',
+      lineItems: [
+        {
+          id: `LI-${Date.now()}`,
+          description: `Monthly Facility Management Charges (${billingPeriod})`,
+          sourceRef: `${project.agreementId} / Contract Rate`,
+          amount: baseAmt,
+        },
+        ...(extra > 0
+          ? [
+              {
+                id: `LI-EX-${Date.now()}`,
+                description: 'Approved Additional Services / Consumables',
+                sourceRef: 'Approved Variation Order',
+                amount: extra,
+              },
+            ]
+          : []),
+      ],
+      deductions: ded,
+      taxableValue,
+      cgst,
+      sgst,
+      igst,
+      totalAmount,
+      paidAmount: 0,
+      tdsAmount: 0,
+      creditNoteAmount: 0,
+      status: 'Pending Approval',
+      financeSmsVerified: false,
+    };
+
+    onCreateInvoice(invoice);
+    setSelectedId(invoice.id);
+    setShowNewModal(false);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-[#14263D]">Stage 06 · Contract-Linked Invoicing & GST Billing</h1>
+          <p className="text-xs text-slate-600 mt-0.5">
+            Every invoice line traces directly to an executed agreement or approved variation. Intra/Inter-State GST rules apply automatically.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowNewModal(true)}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+        >
+          <Plus className="h-4 w-4" />
+          Generate Contract Invoice
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        <div className="lg:col-span-5 rounded-xl border border-slate-200 bg-white overflow-hidden">
+          <div className="border-b border-slate-200 px-5 py-3.5">
+            <h2 className="text-sm font-semibold text-[#14263D]">Invoice Ledger ({invoices.length})</h2>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {invoices.map((inv) => (
+              <button
+                key={inv.id}
+                type="button"
+                onClick={() => setSelectedId(inv.id)}
+                className={`w-full text-left p-4 hover:bg-[#F3F6FA]/70 transition-colors ${
+                  active?.id === inv.id ? 'bg-blue-50/50' : ''
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-xs font-semibold text-[#2463EB]">{inv.invoiceNumber}</span>
+                  <span
+                    className={`rounded px-2 py-0.5 text-[11px] font-medium ${
+                      inv.status === 'Paid' || inv.status === 'Issued'
+                        ? 'bg-[#E8F5EE] text-emerald-800'
+                        : inv.status === 'Partially Paid'
+                        ? 'bg-blue-50 text-[#2463EB]'
+                        : 'bg-[#FFF2E5] text-amber-800'
+                    }`}
+                  >
+                    {inv.status}
+                  </span>
+                </div>
+                <div className="mt-1 text-sm font-semibold text-[#14263D]">{inv.clientName}</div>
+                <div className="mt-1 flex justify-between text-xs text-slate-500 tabular-nums">
+                  <span>{inv.billingPeriod} · Due {inv.dueDate}</span>
+                  <span className="font-mono font-semibold text-[#14263D]">{formatInrFull(inv.totalAmount)}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {active && (
+          <div className="lg:col-span-7 rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Receipt className="h-4 w-4 text-[#2463EB]" />
+                  <span className="font-mono text-xs font-semibold text-[#2463EB]">{active.invoiceNumber}</span>
+                </div>
+                <h2 className="text-lg font-bold text-[#14263D] mt-1">{active.clientName}</h2>
+                <p className="text-xs text-slate-600 font-mono">
+                  GSTIN: {active.gstin} · PO: {active.poNumber} · {active.placeOfSupply}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 no-print">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-[#14263D] hover:bg-slate-50"
+                >
+                  <Printer className="h-3.5 w-3.5" />
+                  Print Tax Invoice
+                </button>
+                {!active.financeSmsVerified ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onTriggerSmsVerify({
+                        title: 'Finance Approval & Issue Invoice via SMS',
+                        subtitle: `Authorize ${active.invoiceNumber} (${formatInrFull(active.totalAmount)})`,
+                        phone: '+919840123980',
+                        recipientName: 'Suresh Iyer (Finance Manager)',
+                        purpose: 'invoice_approval',
+                        entityType: 'invoice',
+                        entityId: active.id,
+                        entityLabel: `${active.invoiceNumber} · ${active.clientName}`,
+                      })
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+                  >
+                    <ShieldCheck className="h-4 w-4" />
+                    Approve & Issue (SMS OTP)
+                  </button>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-lg bg-[#E8F5EE] px-3 py-2 text-xs font-semibold text-emerald-800">
+                    <CheckCircle2 className="h-4 w-4" />
+                    Finance SMS Verified
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <table className="w-full text-left text-xs border border-slate-200">
+              <thead className="bg-[#F3F6FA] text-slate-600">
+                <tr>
+                  <th className="px-3 py-2.5 font-semibold">Line Item Description</th>
+                  <th className="px-3 py-2.5 font-semibold">Contract Traceability</th>
+                  <th className="px-3 py-2.5 font-semibold text-right">Amount (₹)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {active.lineItems.map((li) => (
+                  <tr key={li.id}>
+                    <td className="px-3 py-2.5 font-medium text-[#14263D]">{li.description}</td>
+                    <td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{li.sourceRef}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{formatInrFull(li.amount)}</td>
+                  </tr>
+                ))}
+                {active.deductions > 0 && (
+                  <tr>
+                    <td className="px-3 py-2 text-rose-700">Applicable Deductions / SLA Credit</td>
+                    <td className="px-3 py-2 font-mono text-[11px] text-slate-500">Contract SLA</td>
+                    <td className="px-3 py-2 text-right font-mono tabular-nums text-rose-700">
+                      -{formatInrFull(active.deductions)}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+
+            <div className="rounded-lg border border-slate-200 bg-[#F3F6FA] p-4 space-y-1.5 text-xs">
+              <div className="flex justify-between">
+                <span className="text-slate-600">Taxable Value</span>
+                <span className="font-mono font-semibold tabular-nums">{formatInrFull(active.taxableValue)}</span>
+              </div>
+              {active.placeOfSupply === 'Intra-State' ? (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">CGST (9%)</span>
+                    <span className="font-mono tabular-nums">{formatInrFull(active.cgst)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">SGST (9%)</span>
+                    <span className="font-mono tabular-nums">{formatInrFull(active.sgst)}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="flex justify-between">
+                  <span className="text-slate-600">IGST (18%)</span>
+                  <span className="font-mono tabular-nums">{formatInrFull(active.igst)}</span>
+                </div>
+              )}
+              <div className="flex justify-between border-t border-slate-300 pt-2 text-sm font-bold text-[#14263D]">
+                <span>Invoice Total</span>
+                <span className="font-mono tabular-nums">{formatInrFull(active.totalAmount)}</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {showNewModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
+            <div className="bg-[#14263D] px-5 py-4 text-white flex justify-between items-center">
+              <h2 className="text-sm font-semibold">Generate Contract-Linked Invoice</h2>
+              <button type="button" onClick={() => setShowNewModal(false)} className="text-slate-300 hover:text-white">
+                ×
+              </button>
+            </div>
+            <form onSubmit={handleGenerateInvoice} className="p-5 space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Active Project</label>
+                <select
+                  value={newProjectId}
+                  onChange={(e) => setNewProjectId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
+                >
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.code} — {p.clientName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Billing Period</label>
+                  <input
+                    type="text"
+                    value={billingPeriod}
+                    onChange={(e) => setBillingPeriod(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Place of Supply</label>
+                  <select
+                    value={placeOfSupply}
+                    onChange={(e) => setPlaceOfSupply(e.target.value as 'Intra-State' | 'Inter-State')}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
+                  >
+                    <option value="Intra-State">Intra-State (CGST+SGST)</option>
+                    <option value="Inter-State">Inter-State (IGST)</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Client PO Number</label>
+                <input
+                  type="text"
+                  value={poNumber}
+                  onChange={(e) => setPoNumber(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Approved Extra Charges (₹)</label>
+                  <input
+                    type="number"
+                    value={extraAmount}
+                    onChange={(e) => setExtraAmount(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Contract Deductions (₹)</label>
+                  <input
+                    type="number"
+                    value={deductions}
+                    onChange={(e) => setDeductions(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowNewModal(false)}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-medium text-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+                >
+                  Create Draft Invoice
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

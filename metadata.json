@@ -1,0 +1,6 @@
+{
+  "name": "Facility Management ERP",
+  "description": "Centralized CRM, commercial costing, LOI, agreements, project handover, contract-linked invoicing, and SMS verification platform for Facility Management operations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
