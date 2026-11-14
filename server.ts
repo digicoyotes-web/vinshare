@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
+import dns from 'node:dns';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { format as formatLog } from 'node:util';
 import dotenv from 'dotenv';
@@ -1248,6 +1250,731 @@ export async function pingSmtpServer(
   }
 }
 
+export interface SmtpDiagnosticStage {
+  id: 'dns' | 'tcp' | 'tls' | 'auth';
+  label: string;
+  status: 'pass' | 'fail' | 'skipped';
+  latencyMs?: number;
+  detail: string;
+}
+
+export type SmtpFailureCategory =
+  | 'Wrong Password'
+  | 'Port Blocked'
+  | 'SSL Protocol Mismatch'
+  | 'Host Not Found'
+  | 'Missing Credentials'
+  | 'Encryption Required'
+  | 'Handshake Failed';
+
+export interface SmtpDiagnosticResult {
+  ok: boolean;
+  host: string;
+  port: number;
+  secure: boolean;
+  resolvedIp?: string;
+  banner?: string;
+  tlsProtocol?: string;
+  tlsCipher?: string;
+  failureCategory?: SmtpFailureCategory;
+  plainEnglishTitle: string;
+  plainEnglishExplanation: string;
+  recommendedSteps: string[];
+  suggestedFix?: {
+    label: string;
+    port: number;
+    secure: boolean;
+  };
+  stages: SmtpDiagnosticStage[];
+  trace: string[];
+  logEntryId?: string;
+}
+
+async function probeRawTcpConnect(
+  host: string,
+  port: number,
+  timeoutMs = 6000
+): Promise<{ latencyMs: number }> {
+  const startedAt = Date.now();
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host, port });
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      const err = new Error(`TCP connection to ${host}:${port} timed out after ${timeoutMs} ms`) as Error & {
+        code?: string;
+      };
+      err.code = 'ETIMEDOUT';
+      reject(err);
+    }, timeoutMs);
+
+    socket.once('connect', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const latencyMs = Date.now() - startedAt;
+      socket.end();
+      resolve({ latencyMs });
+    });
+
+    socket.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      reject(err);
+    });
+  });
+}
+
+async function probeTlsSocketHandshake(
+  host: string,
+  port: number,
+  secure: boolean,
+  trace: string[]
+): Promise<{
+  latencyMs: number;
+  banner: string;
+  tlsProtocol: string;
+  tlsCipher: string;
+}> {
+  const startedAt = Date.now();
+
+  if (secure) {
+    return new Promise((resolve, reject) => {
+      const tlsSocket = tls.connect({
+        host,
+        port,
+        servername: host,
+        rejectUnauthorized: true,
+      });
+      let settled = false;
+      let banner = '';
+      let tlsProtocol = '';
+      let tlsCipher = '';
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        tlsSocket.destroy();
+        const err = new Error(`TLS handshake on ${host}:${port} timed out`) as Error & {
+          code?: string;
+        };
+        err.code = tlsProtocol ? 'NO_BANNER' : 'SSL_MISMATCH_TIMEOUT';
+        reject(err);
+      }, 7000);
+
+      tlsSocket.once('secureConnect', () => {
+        tlsProtocol = tlsSocket.getProtocol() || 'TLS';
+        tlsCipher = tlsSocket.getCipher()?.name || 'Standard';
+        trace.push(`[TLS] Implicit SSL/TLS negotiated (${tlsProtocol} / ${tlsCipher})`);
+
+        const bannerWait = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          tlsSocket.end();
+          resolve({
+            latencyMs: Date.now() - startedAt,
+            banner,
+            tlsProtocol,
+            tlsCipher,
+          });
+        }, 1800);
+
+        tlsSocket.once('data', (chunk) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(bannerWait);
+          clearTimeout(timer);
+          banner = chunk.toString('utf8').split(/\r?\n/)[0]?.trim() || '';
+          if (banner) trace.push(`S: ${banner}`);
+          tlsSocket.end();
+          resolve({
+            latencyMs: Date.now() - startedAt,
+            banner,
+            tlsProtocol,
+            tlsCipher,
+          });
+        });
+      });
+
+      tlsSocket.once('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        tlsSocket.destroy();
+        reject(err);
+      });
+    });
+  }
+
+  // STARTTLS socket-level probe
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host, port });
+    let settled = false;
+    let phase: 'banner' | 'ehlo' | 'starttls' | 'tls' = 'banner';
+    let banner = '';
+    let buffer = '';
+
+    const fail = (err: Error & { code?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      reject(err);
+    };
+
+    const timer = setTimeout(() => {
+      const err = new Error(
+        phase === 'banner'
+          ? `Server on ${host}:${port} did not send an SMTP greeting banner (likely expects SSL/TLS instead of STARTTLS)`
+          : `STARTTLS negotiation timed out at stage "${phase}"`
+      ) as Error & { code?: string };
+      err.code = phase === 'banner' ? 'SSL_EXPECTED_NO_BANNER' : 'ETIMEDOUT';
+      fail(err);
+    }, 7000);
+
+    socket.on('error', (err) => fail(err as Error & { code?: string }));
+
+    socket.on('close', () => {
+      if (!settled && phase === 'banner') {
+        const err = new Error(
+          `Socket closed before SMTP greeting banner on ${host}:${port} (port may expect immediate SSL/TLS)`
+        ) as Error & { code?: string };
+        err.code = 'SSL_EXPECTED_NO_BANNER';
+        fail(err);
+      }
+    });
+
+    socket.on('data', (chunk) => {
+      if (settled) return;
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        trace.push(`S: ${line}`);
+
+        if (phase === 'banner') {
+          banner = line;
+          if (/^\d{3}\s/.test(line)) {
+            phase = 'ehlo';
+            trace.push('C: EHLO erp-diagnostic.local');
+            socket.write('EHLO erp-diagnostic.local\r\n');
+          }
+        } else if (phase === 'ehlo') {
+          if (/^250\s/.test(line)) {
+            phase = 'starttls';
+            trace.push('C: STARTTLS');
+            socket.write('STARTTLS\r\n');
+          } else if (/^[45]\d{2}\s/.test(line)) {
+            const err = new Error(`EHLO rejected: ${line}`) as Error & { code?: string };
+            err.code = 'EHLO_REJECTED';
+            fail(err);
+          }
+        } else if (phase === 'starttls') {
+          if (line.startsWith('220')) {
+            phase = 'tls';
+            socket.removeAllListeners('data');
+            socket.removeAllListeners('close');
+            const tlsSocket = tls.connect({
+              socket,
+              servername: host,
+              rejectUnauthorized: true,
+            });
+            tlsSocket.once('secureConnect', () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              const tlsProtocol = tlsSocket.getProtocol() || 'TLS';
+              const tlsCipher = tlsSocket.getCipher()?.name || 'Standard';
+              trace.push(`[TLS] STARTTLS upgraded (${tlsProtocol} / ${tlsCipher})`);
+              tlsSocket.end();
+              resolve({
+                latencyMs: Date.now() - startedAt,
+                banner,
+                tlsProtocol,
+                tlsCipher,
+              });
+            });
+            tlsSocket.once('error', (err) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              tlsSocket.destroy();
+              reject(err);
+            });
+          } else {
+            const err = new Error(`STARTTLS failed or unsupported: ${line}`) as Error & {
+              code?: string;
+            };
+            err.code = 'STARTTLS_UNSUPPORTED';
+            fail(err);
+          }
+        }
+      }
+    });
+  });
+}
+
+async function runSmtpSocketDiagnostics(input: {
+  host: string;
+  port: number;
+  secure: boolean;
+  user?: string;
+  pass?: string;
+}): Promise<SmtpDiagnosticResult> {
+  const host = (input.host || '').trim();
+  const port = Number(input.port) || 587;
+  const secure = typeof input.secure === 'boolean' ? input.secure : port === 465;
+  const user = (input.user || '').trim();
+  const pass = normalizeSmtpPassword(host, input.pass || '');
+
+  const stages: SmtpDiagnosticStage[] = [];
+  const trace: string[] = [];
+
+  if (!isValidSmtpHost(host) || !isValidSmtpPort(port)) {
+    const res: SmtpDiagnosticResult = {
+      ok: false,
+      host,
+      port,
+      secure,
+      failureCategory: 'Host Not Found',
+      plainEnglishTitle: 'Invalid SMTP Host or Port',
+      plainEnglishExplanation:
+        'The SMTP Host or Port looks incomplete or invalid. No network socket could be opened.',
+      recommendedSteps: [
+        'Enter a real SMTP server domain such as smtp.gmail.com, smtp.office365.com, or smtp.zoho.in.',
+        'Use Port 587 with STARTTLS or Port 465 with SSL/TLS.',
+      ],
+      suggestedFix: {
+        label: 'Apply Gmail 587 (STARTTLS)',
+        port: 587,
+        secure: false,
+      },
+      stages: [
+        {
+          id: 'dns',
+          label: '1. DNS Lookup',
+          status: 'fail',
+          detail: `Invalid hostname "${host || 'empty'}" or port ${port}.`,
+        },
+        { id: 'tcp', label: '2. TCP Socket', status: 'skipped', detail: 'Skipped' },
+        { id: 'tls', label: '3. TLS / SSL Handshake', status: 'skipped', detail: 'Skipped' },
+        { id: 'auth', label: '4. SMTP Login (AUTH)', status: 'skipped', detail: 'Skipped' },
+      ],
+      trace: [`[PREFLIGHT] Invalid host="${host}" port=${port}`],
+    };
+    return res;
+  }
+
+  // Stage 1: DNS Resolution
+  let resolvedIp = '';
+  const dnsStart = Date.now();
+  try {
+    const lookup = await dns.promises.lookup(host);
+    resolvedIp = lookup.address;
+    const dnsMs = Date.now() - dnsStart;
+    trace.push(`[DNS] Resolved ${host} -> ${resolvedIp} (IPv${lookup.family}) in ${dnsMs} ms`);
+    stages.push({
+      id: 'dns',
+      label: '1. DNS Lookup',
+      status: 'pass',
+      latencyMs: dnsMs,
+      detail: `Resolved to ${resolvedIp} (IPv${lookup.family})`,
+    });
+  } catch (err) {
+    const dnsMs = Date.now() - dnsStart;
+    const msg = err instanceof Error ? err.message : String(err);
+    trace.push(`[DNS] Failed resolving ${host}: ${msg}`);
+    stages.push({
+      id: 'dns',
+      label: '1. DNS Lookup',
+      status: 'fail',
+      latencyMs: dnsMs,
+      detail: msg,
+    });
+    stages.push(
+      { id: 'tcp', label: '2. TCP Socket', status: 'skipped', detail: 'Skipped after DNS failure' },
+      { id: 'tls', label: '3. TLS / SSL Handshake', status: 'skipped', detail: 'Skipped' },
+      { id: 'auth', label: '4. SMTP Login (AUTH)', status: 'skipped', detail: 'Skipped' }
+    );
+    const logged = pushSmtpActivityLog({
+      eventType: 'Connection Test',
+      to: user || host,
+      from: user || 'Socket Diagnostic',
+      subject: `Socket Diagnostic (${host}:${port})`,
+      status: 'Failed',
+      smtpHost: host,
+      smtpPort: port,
+      errorMessage: `Host Not Found: Could not resolve "${host}" via DNS.`,
+      smtpErrorCode: 'EDNS',
+      smtpCommand: 'DNS',
+      smtpRawResponse: msg,
+      actionHint: 'Double-check the SMTP Host spelling (e.g. smtp.gmail.com) and remove spaces or https://.',
+      debuggingClues: [`DNS failed for "${host}": ${msg}`],
+      handshakeTrace: trace,
+      attachmentCount: 0,
+    });
+    return {
+      ok: false,
+      host,
+      port,
+      secure,
+      failureCategory: 'Host Not Found',
+      plainEnglishTitle: 'Host Not Found (DNS Error)',
+      plainEnglishExplanation: `We could not find an internet address for "${host}". Usually this means there is a typo in the SMTP Host field.`,
+      recommendedSteps: [
+        'Check the SMTP Host spelling (e.g. smtp.gmail.com, smtp.office365.com, smtp.zoho.in).',
+        'Make sure there are no leading spaces, trailing spaces, or "https://" prefixes.',
+      ],
+      stages,
+      trace,
+      logEntryId: logged.id,
+    };
+  }
+
+  // Stage 2: Raw TCP Socket Connectivity
+  try {
+    const tcp = await probeRawTcpConnect(host, port, 6000);
+    trace.push(`[TCP] Connected socket to ${resolvedIp}:${port} in ${tcp.latencyMs} ms`);
+    stages.push({
+      id: 'tcp',
+      label: '2. TCP Socket',
+      status: 'pass',
+      latencyMs: tcp.latencyMs,
+      detail: `Port ${port} reachable (${tcp.latencyMs} ms)`,
+    });
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    const code = e.code || 'ECONNECTION';
+    const msg = e.message || String(err);
+    trace.push(`[TCP] Failed connecting to ${host}:${port} (${code}): ${msg}`);
+    stages.push({
+      id: 'tcp',
+      label: '2. TCP Socket',
+      status: 'fail',
+      detail: `${code}: ${msg}`,
+    });
+    stages.push(
+      { id: 'tls', label: '3. TLS / SSL Handshake', status: 'skipped', detail: 'Skipped because port is unreachable' },
+      { id: 'auth', label: '4. SMTP Login (AUTH)', status: 'skipped', detail: 'Skipped' }
+    );
+    const isTimeout = code === 'ETIMEDOUT';
+    const title = isTimeout
+      ? 'Port Blocked (Firewall Timeout)'
+      : 'Port Blocked / Connection Refused';
+    const explanation = isTimeout
+      ? `Port ${port} on ${host} did not reply within 6 seconds. Outbound traffic on port ${port} is likely blocked by a firewall or cloud policy.`
+      : `${host} actively refused our connection on port ${port}. Either the port number is wrong or the mail server is not listening on port ${port}.`;
+    const suggestedFix =
+      port === 587
+        ? { label: 'Try Port 465 (SSL/TLS)', port: 465, secure: true }
+        : { label: 'Try Port 587 (STARTTLS)', port: 587, secure: false };
+    const logged = pushSmtpActivityLog({
+      eventType: 'Connection Test',
+      to: user || host,
+      from: user || 'Socket Diagnostic',
+      subject: `Socket Diagnostic (${host}:${port})`,
+      status: 'Failed',
+      smtpHost: host,
+      smtpPort: port,
+      errorMessage: `${title}: ${msg}`,
+      smtpErrorCode: code,
+      smtpCommand: 'TCP_CONNECT',
+      smtpRawResponse: msg,
+      actionHint: `Try ${suggestedFix.label} and verify outbound access to port ${port}.`,
+      debuggingClues: [explanation, `Resolved IP: ${resolvedIp}`],
+      handshakeTrace: trace,
+      attachmentCount: 0,
+    });
+    return {
+      ok: false,
+      host,
+      port,
+      secure,
+      resolvedIp,
+      failureCategory: 'Port Blocked',
+      plainEnglishTitle: title,
+      plainEnglishExplanation: explanation,
+      recommendedSteps: [
+        `If Port 25 or ${port} is blocked by your network or cloud container, try Port 587 (STARTTLS) or Port 465 (SSL/TLS).`,
+        'Confirm your SMTP provider accepts external SMTP connections on this port.',
+      ],
+      suggestedFix,
+      stages,
+      trace,
+      logEntryId: logged.id,
+    };
+  }
+
+  // Stage 3: TLS / SSL Protocol Probe
+  let banner = '';
+  let tlsProtocol = '';
+  let tlsCipher = '';
+  try {
+    const tlsRes = await probeTlsSocketHandshake(host, port, secure, trace);
+    banner = tlsRes.banner;
+    tlsProtocol = tlsRes.tlsProtocol;
+    tlsCipher = tlsRes.tlsCipher;
+    stages.push({
+      id: 'tls',
+      label: '3. TLS / SSL Handshake',
+      status: 'pass',
+      latencyMs: tlsRes.latencyMs,
+      detail: `${tlsProtocol} (${tlsCipher})`,
+    });
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    const rawMsg = e.message || String(err);
+    const lower = rawMsg.toLowerCase();
+    const isSslMismatch =
+      e.code === 'SSL_EXPECTED_NO_BANNER' ||
+      e.code === 'SSL_MISMATCH_TIMEOUT' ||
+      e.code === 'STARTTLS_UNSUPPORTED' ||
+      lower.includes('wrong version number') ||
+      lower.includes('ssl routines') ||
+      lower.includes('packet length too long') ||
+      lower.includes('unknown protocol');
+
+    trace.push(`[TLS] Handshake failed (${e.code || 'TLS_ERR'}): ${rawMsg}`);
+    stages.push({
+      id: 'tls',
+      label: '3. TLS / SSL Handshake',
+      status: 'fail',
+      detail: rawMsg,
+    });
+    stages.push({
+      id: 'auth',
+      label: '4. SMTP Login (AUTH)',
+      status: 'skipped',
+      detail: 'Skipped after TLS/SSL mismatch',
+    });
+
+    const suggestedFix = secure
+      ? {
+          label: port === 465 ? 'Switch Port 465 to 587 (STARTTLS)' : `Switch Port ${port} to STARTTLS`,
+          port: port === 465 ? 587 : port,
+          secure: false,
+        }
+      : {
+          label: port === 587 ? 'Switch Port 587 to 465 (SSL/TLS)' : `Switch Port ${port} to SSL/TLS`,
+          port: port === 587 ? 465 : port,
+          secure: true,
+        };
+
+    const explanation = isSslMismatch
+      ? secure
+        ? `SSL Protocol Mismatch: You selected SSL/TLS on port ${port}, but the server expected a plaintext STARTTLS greeting first (or vice versa).`
+        : `SSL Protocol Mismatch: You selected STARTTLS on port ${port}, but the server immediately expects an SSL/TLS encrypted handshake (common on Port 465).`
+      : `TLS negotiation with ${host}:${port} failed: ${rawMsg}`;
+
+    const logged = pushSmtpActivityLog({
+      eventType: 'Connection Test',
+      to: user || host,
+      from: user || 'Socket Diagnostic',
+      subject: `Socket Diagnostic (${host}:${port})`,
+      status: 'Failed',
+      smtpHost: host,
+      smtpPort: port,
+      errorMessage: explanation,
+      smtpErrorCode: e.code || 'ESOCKET',
+      smtpCommand: secure ? 'TLS_CONNECT' : 'STARTTLS',
+      smtpRawResponse: rawMsg,
+      actionHint: `Use Port 587 with STARTTLS or Port 465 with SSL/TLS.`,
+      debuggingClues: [explanation, 'Port 587 = STARTTLS (secure: false)', 'Port 465 = SSL/TLS (secure: true)'],
+      handshakeTrace: trace,
+      attachmentCount: 0,
+    });
+
+    return {
+      ok: false,
+      host,
+      port,
+      secure,
+      resolvedIp,
+      failureCategory: 'SSL Protocol Mismatch',
+      plainEnglishTitle: isSslMismatch ? 'SSL Protocol Mismatch' : 'TLS Certificate / Socket Error',
+      plainEnglishExplanation: explanation,
+      recommendedSteps: [
+        'Use Encryption = STARTTLS when connecting on Port 587.',
+        'Use Encryption = SSL/TLS when connecting on Port 465.',
+      ],
+      suggestedFix,
+      stages,
+      trace,
+      logEntryId: logged.id,
+    };
+  }
+
+  // Stage 4: SMTP Authentication Check (if credentials are entered)
+  if (!user || !pass) {
+    stages.push({
+      id: 'auth',
+      label: '4. SMTP Login (AUTH)',
+      status: 'skipped',
+      detail: 'Network & TLS passed. Enter Username & Password to test login.',
+    });
+    const logged = pushSmtpActivityLog({
+      eventType: 'Connection Test',
+      to: host,
+      from: user || 'Socket Diagnostic',
+      subject: `Socket Diagnostic (${host}:${port})`,
+      status: 'Sent',
+      smtpHost: host,
+      smtpPort: port,
+      response: `DNS + TCP + ${tlsProtocol} OK${banner ? ` (${banner})` : ''}`,
+      debuggingClues: [
+        `DNS resolved to ${resolvedIp}`,
+        `TLS negotiated: ${tlsProtocol} (${tlsCipher})`,
+        'AUTH login skipped because credentials were not entered.',
+      ],
+      handshakeTrace: trace,
+      attachmentCount: 0,
+    });
+    return {
+      ok: true,
+      host,
+      port,
+      secure,
+      resolvedIp,
+      banner,
+      tlsProtocol,
+      tlsCipher,
+      plainEnglishTitle: 'Socket & TLS Connectivity Healthy',
+      plainEnglishExplanation: `Your server can reach ${host}:${port} and completed the ${tlsProtocol} handshake cleanly. Enter your SMTP Username and Password / App Password to verify login too.`,
+      recommendedSteps: [
+        'Enter your full mailbox email as SMTP Username.',
+        'For Gmail, paste a 16-character Google App Password and click Verify & Save SMTP Settings.',
+      ],
+      stages,
+      trace,
+      logEntryId: logged.id,
+    };
+  }
+
+  const authCheck = await checkSmtpConnection({ host, port, secure, user, pass });
+  const mergedTrace = [...trace, ...authCheck.handshakeTrace];
+
+  if (authCheck.ok) {
+    stages.push({
+      id: 'auth',
+      label: '4. SMTP Login (AUTH)',
+      status: 'pass',
+      latencyMs: authCheck.latencyMs,
+      detail: `Authenticated as ${user}`,
+    });
+    const logged = pushSmtpActivityLog({
+      eventType: 'Connection Test',
+      to: user,
+      from: user,
+      subject: `Socket Diagnostic (${host}:${port})`,
+      status: 'Sent',
+      smtpHost: host,
+      smtpPort: port,
+      response: `All 4 stages passed (${tlsProtocol}, AUTH OK)`,
+      debuggingClues: authCheck.debuggingClues,
+      handshakeTrace: mergedTrace,
+      attachmentCount: 0,
+    });
+    return {
+      ok: true,
+      host,
+      port,
+      secure,
+      resolvedIp,
+      banner,
+      tlsProtocol,
+      tlsCipher,
+      plainEnglishTitle: 'All SMTP Diagnostics Passed',
+      plainEnglishExplanation: `DNS, TCP socket, ${tlsProtocol} encryption, and SMTP login for ${user} all succeeded on ${host}:${port}.`,
+      recommendedSteps: ['Click "Verify & Save SMTP Settings" to lock in this configuration for ERP emails.'],
+      stages,
+      trace: mergedTrace,
+      logEntryId: logged.id,
+    };
+  }
+
+  const isAuthErr =
+    authCheck.smtpErrorCode === 'EAUTH' ||
+    authCheck.smtpResponseCode === 535 ||
+    (authCheck.smtpRawResponse || '').toLowerCase().includes('username and password');
+  const isStartTlsRequired =
+    authCheck.smtpResponseCode === 530 || authCheck.smtpResponseCode === 534;
+
+  const failureCategory: SmtpFailureCategory = isAuthErr
+    ? 'Wrong Password'
+    : isStartTlsRequired
+      ? 'Encryption Required'
+      : 'Handshake Failed';
+  const plainEnglishTitle = isAuthErr
+    ? host.toLowerCase().includes('gmail')
+      ? 'Wrong Password (or Gmail App Password Required)'
+      : 'Wrong Username or Password'
+    : isStartTlsRequired
+      ? 'Encryption Required by Mail Server'
+      : 'SMTP Handshake Failed';
+  const plainEnglishExplanation = isAuthErr
+    ? host.toLowerCase().includes('gmail')
+      ? `The socket connected to Gmail and encrypted cleanly (${tlsProtocol}), but Gmail rejected your login (535). Gmail blocks normal account passwords here — you must use a 16-character Google App Password.`
+      : `The socket connected and encrypted cleanly (${tlsProtocol}), but ${host} rejected the username or password (SMTP ${authCheck.smtpResponseCode || '535'}).`
+    : authCheck.message;
+
+  stages.push({
+    id: 'auth',
+    label: '4. SMTP Login (AUTH)',
+    status: 'fail',
+    latencyMs: authCheck.latencyMs,
+    detail: authCheck.smtpRawResponse || authCheck.message,
+  });
+
+  const logged = pushSmtpActivityLog({
+    eventType: 'Connection Test',
+    to: user,
+    from: user,
+    subject: `Socket Diagnostic (${host}:${port})`,
+    status: 'Failed',
+    smtpHost: host,
+    smtpPort: port,
+    errorMessage: plainEnglishExplanation,
+    smtpErrorCode: authCheck.smtpErrorCode,
+    smtpResponseCode: authCheck.smtpResponseCode,
+    smtpCommand: authCheck.smtpCommand,
+    smtpRawResponse: authCheck.smtpRawResponse,
+    actionHint: authCheck.actionHint,
+    debuggingClues: authCheck.debuggingClues,
+    handshakeTrace: mergedTrace,
+    attachmentCount: 0,
+  });
+
+  return {
+    ok: false,
+    host,
+    port,
+    secure,
+    resolvedIp,
+    banner,
+    tlsProtocol,
+    tlsCipher,
+    failureCategory,
+    plainEnglishTitle,
+    plainEnglishExplanation,
+    recommendedSteps:
+      authCheck.debuggingClues.length > 0
+        ? authCheck.debuggingClues
+        : [authCheck.actionHint || 'Check SMTP Username and Password / App Password.'],
+    stages,
+    trace: mergedTrace,
+    logEntryId: logged.id,
+  };
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '25mb' }));
@@ -1942,6 +2669,26 @@ async function startServer() {
 
   app.post('/api/email/smtp-ping', handleSmtpPingRoute);
   app.post('/api/email/smtp-test', handleSmtpPingRoute);
+
+  app.post('/api/email/smtp-diagnose', async (req, res) => {
+    const body = req.body ?? {};
+    const host = String(body.host ?? runtimeSmtpConfig.host).trim();
+    const port = Number(body.port ?? runtimeSmtpConfig.port) || 587;
+    const secure =
+      typeof body.secure === 'boolean' ? body.secure : port === 465;
+    const user = String(body.user ?? runtimeSmtpConfig.user).trim();
+    const incomingPass = typeof body.pass === 'string' ? body.pass : '';
+    const pass = incomingPass ? incomingPass : runtimeSmtpConfig.pass;
+
+    const report = await runSmtpSocketDiagnostics({
+      host,
+      port,
+      secure,
+      user,
+      pass,
+    });
+    return res.status(report.ok ? 200 : 422).json(report);
+  });
 
   app.post('/api/email/smtp-reset', (_req, res) => {
     clearPersistedSmtpConfig();

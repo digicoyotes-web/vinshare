@@ -499,6 +499,28 @@ export async function checkSmtpConnection(
     };
   }
 
+  if (res.status === 405 && !parsed?.message) {
+    return {
+      ok: false,
+      host,
+      port,
+      secure,
+      latencyMs: 0,
+      message:
+        'Backend SMTP API unavailable (HTTP 405 Method Not Allowed): this preview URL is serving static frontend files without the Node.js Express server.',
+      smtpErrorCode: 'HTTP_405',
+      smtpCommand: 'HTTP_RPC',
+      smtpRawResponse: rawText.slice(0, 220) || 'HTTP 405 Method Not Allowed on POST /api/email/smtp-verify',
+      actionHint:
+        'Open the Development App URL (or run `npm run dev` / `npm start` on port 3000) so `server.ts` handles `/api/email/*` and can open SMTP sockets.',
+      debuggingClues: [
+        'Static-only preview servers (such as Shared App URLs or static CDN builds) reject POST /api/email/* with HTTP 405.',
+        'Use the full-stack Development App URL backed by `server.ts`.',
+      ],
+      handshakeTrace: [`POST /api/email/smtp-verify -> HTTP 405 Method Not Allowed`],
+    };
+  }
+
   return {
     ok: Boolean(parsed.ok && res.ok),
     host: parsed.host || host,

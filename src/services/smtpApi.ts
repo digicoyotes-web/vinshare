@@ -118,6 +118,24 @@ export async function saveAndVerifySmtpConfig(
   });
   const { data, nonJsonDetail } = await readJsonPayload(res);
   if (!res.ok) {
+    if (res.status === 405 && !data?.message) {
+      throw new SmtpConnectionError(
+        'Backend SMTP API unavailable (HTTP 405 Method Not Allowed): this URL is serving static frontend files without the Node.js Express server.',
+        {
+          status: 405,
+          smtpErrorCode: 'HTTP_405',
+          smtpCommand: 'HTTP_RPC',
+          smtpRawResponse: nonJsonDetail || 'HTTP 405 Method Not Allowed on POST /api/email/smtp-config',
+          actionHint:
+            'Open the Development App URL (or run the full-stack server via `npm run dev` / `npm start` on port 3000) so POST /api/email/* routes can open live SMTP sockets.',
+          debuggingClues: [
+            'Static preview hosts (such as Shared App URLs or static CDNs) reject POST /api/email/* requests with HTTP 405.',
+            'SMTP requires a running Node.js backend (`server.ts`) because web browsers cannot open raw TCP/TLS sockets directly.',
+          ],
+        }
+      );
+    }
+
     const message = String(
       data?.message ||
         data?.error ||
@@ -255,6 +273,142 @@ export async function pingSmtpConnection(input: {
 }
 
 export const testSmtpConnection = pingSmtpConnection;
+
+export interface SmtpDiagnosticStage {
+  id: 'dns' | 'tcp' | 'tls' | 'auth';
+  label: string;
+  status: 'pass' | 'fail' | 'skipped';
+  latencyMs?: number;
+  detail: string;
+}
+
+export interface SmtpDiagnosticReport {
+  ok: boolean;
+  host: string;
+  port: number;
+  secure: boolean;
+  resolvedIp?: string;
+  banner?: string;
+  tlsProtocol?: string;
+  tlsCipher?: string;
+  failureCategory?: string;
+  plainEnglishTitle: string;
+  plainEnglishExplanation: string;
+  recommendedSteps: string[];
+  suggestedFix?: {
+    label: string;
+    port: number;
+    secure: boolean;
+  };
+  stages: SmtpDiagnosticStage[];
+  trace: string[];
+  logEntryId?: string;
+}
+
+export async function diagnoseSmtpConnection(input: {
+  host: string;
+  port: number;
+  secure: boolean;
+  user?: string;
+  pass?: string;
+}): Promise<SmtpDiagnosticReport> {
+  const host = input.host.trim();
+  const port = Number(input.port) || 587;
+  const secure = input.secure;
+
+  let res: Response;
+  try {
+    res = await fetch('/api/email/smtp-diagnose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host,
+        port,
+        secure,
+        user: (input.user || '').trim(),
+        pass: input.pass || undefined,
+      }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      host,
+      port,
+      secure,
+      failureCategory: 'Port Blocked',
+      plainEnglishTitle: 'Backend Diagnostic Service Unreachable',
+      plainEnglishExplanation: `Could not reach the ERP backend API (${msg}). Make sure the Node.js server is running on port 3000.`,
+      recommendedSteps: [
+        'Verify the full-stack server (`tsx server.ts` / `node server.ts`) is active.',
+        'Retry the socket diagnostic once the backend is online.',
+      ],
+      stages: [
+        { id: 'dns', label: '1. DNS Lookup', status: 'skipped', detail: 'Backend unreachable' },
+        { id: 'tcp', label: '2. TCP Socket', status: 'skipped', detail: 'Backend unreachable' },
+        { id: 'tls', label: '3. TLS / SSL Handshake', status: 'skipped', detail: 'Backend unreachable' },
+        { id: 'auth', label: '4. SMTP Login (AUTH)', status: 'skipped', detail: 'Backend unreachable' },
+      ],
+      trace: [`POST /api/email/smtp-diagnose failed: ${msg}`],
+    };
+  }
+
+  const { data, nonJsonDetail } = await readJsonPayload(res);
+
+  if (res.status === 405 && !data?.plainEnglishTitle) {
+    return {
+      ok: false,
+      host,
+      port,
+      secure,
+      failureCategory: 'Backend Static Preview (HTTP 405)',
+      plainEnglishTitle: 'Static Preview Detected (HTTP 405 Method Not Allowed)',
+      plainEnglishExplanation:
+        'This URL is serving static frontend files only, without the Express/Node.js backend (`server.ts`). Web browsers cannot open raw SMTP sockets directly, so POST /api/email/* returns HTTP 405 here.',
+      recommendedSteps: [
+        'Open the Development App URL (or run `npm run dev` / `npm start` on port 3000) where `server.ts` handles `/api/email/*`.',
+        'Static-only hosts (such as `vercel.json` static builds) cannot run Nodemailer SMTP relays.',
+      ],
+      stages: [
+        { id: 'dns', label: '1. DNS Lookup', status: 'skipped', detail: 'Requires active Node.js backend' },
+        { id: 'tcp', label: '2. TCP Socket', status: 'fail', detail: 'HTTP 405 from static server' },
+        { id: 'tls', label: '3. TLS / SSL Handshake', status: 'skipped', detail: 'Skipped' },
+        { id: 'auth', label: '4. SMTP Login (AUTH)', status: 'skipped', detail: 'Skipped' },
+      ],
+      trace: [
+        `POST /api/email/smtp-diagnose -> HTTP 405 Method Not Allowed`,
+        nonJsonDetail || 'Static host rejected POST request to /api/email/smtp-diagnose.',
+      ],
+    };
+  }
+
+  if (data && Array.isArray(data.stages) && typeof data.plainEnglishTitle === 'string') {
+    return data as unknown as SmtpDiagnosticReport;
+  }
+
+  return {
+    ok: false,
+    host,
+    port,
+    secure,
+    failureCategory: 'Handshake Failed',
+    plainEnglishTitle: `Diagnostic Error (HTTP ${res.status})`,
+    plainEnglishExplanation:
+      String(data?.message || data?.error || nonJsonDetail || '') ||
+      `Unexpected response (HTTP ${res.status}) from SMTP diagnostic service.`,
+    recommendedSteps: [
+      'Confirm the ERP Node.js backend (`server.ts`) is up to date and running.',
+      'Check the SMTP Activity Log for recorded handshake traces.',
+    ],
+    stages: [
+      { id: 'dns', label: '1. DNS Lookup', status: 'skipped', detail: `HTTP ${res.status}` },
+      { id: 'tcp', label: '2. TCP Socket', status: 'fail', detail: nonJsonDetail || `HTTP ${res.status}` },
+      { id: 'tls', label: '3. TLS / SSL Handshake', status: 'skipped', detail: 'Skipped' },
+      { id: 'auth', label: '4. SMTP Login (AUTH)', status: 'skipped', detail: 'Skipped' },
+    ],
+    trace: [`POST /api/email/smtp-diagnose -> HTTP ${res.status}`, nonJsonDetail || JSON.stringify(data)],
+  };
+}
 
 export async function resetSmtpConfig(): Promise<SmtpStatusDto> {
   const res = await fetch('/api/email/smtp-reset', {
