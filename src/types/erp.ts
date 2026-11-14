@@ -122,6 +122,11 @@ export interface ProposalRecord {
   contractDurationMonths: number;
   validityDate: string;
   currentVersion: string;
+  proposalDate?: string;
+  subject?: string;
+  introLetter?: string;
+  termsAndConditions?: string[];
+  gstNote?: string;
   versions: ProposalVersion[];
 }
 
@@ -172,6 +177,8 @@ export interface LoiRecord {
   clientContactMobile: string;
   clientSmsAccepted: boolean;
   clientSmsAcceptedAt?: string;
+  customClauses?: string[];
+  operationalTerms?: string[];
 }
 
 export type AgreementStatus =
@@ -375,6 +382,7 @@ export interface ProjectEmailRecord {
   subject: string;
   body: string;
   attachmentName?: string;
+  attachmentNames?: string[];
   status: 'Sent' | 'Delivered' | 'Opened' | 'Replied';
   sentAt: string;
   sentBy: string;
@@ -391,4 +399,23 @@ export interface DocumentVersionSnapshot {
   summaryValue: string;
   statusLabel: string;
 }
+
+export interface VirtualDocumentFile {
+  id: string;
+  folder: 'Proposals' | 'Invoices' | 'Project-Reports';
+  virtualPath: string;
+  filename: string;
+  entityType: EmailEntityType;
+  entityId: string;
+  entityReference: string;
+  clientId: string;
+  clientName: string;
+  versionLabel: string;
+  note: string;
+  savedAt: string;
+  savedBy: string;
+  sizeBytes: number;
+  buildPdf: () => void;
+}
+
 

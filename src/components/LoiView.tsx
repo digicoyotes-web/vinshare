@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { CheckCircle2, FileCheck2, ShieldCheck, Smartphone } from 'lucide-react';
+import { CheckCircle2, Download, FileCheck2, ShieldCheck, Smartphone } from 'lucide-react';
+import { COMPANY_PROFILE } from '../data/seedData';
 import type { LoiRecord, LoiStatus } from '../types/erp';
 import { formatInrCompact, formatInrFull } from '../utils/formatters';
+import { downloadDocumentPdf } from '../utils/pdfGenerator';
 import type { SmsVerifyModalContext } from './SmsVerifyModal';
 
 interface LoiViewProps {
@@ -21,6 +23,40 @@ export const LoiView: React.FC<LoiViewProps> = ({
   const active = lois.find((l) => l.id === selectedId) || lois[0];
 
   if (!active) return null;
+
+  const handleDownloadLoiPdf = () => {
+    const clauseRows = (active.customClauses && active.customClauses.length > 0
+      ? active.customClauses
+      : [
+          `Appointment for Integrated Facility Management Services at ${active.siteName} per proposal ${active.proposalId} (${active.approvedProposalVersion}).`,
+          `Payment terms: ${active.paymentTerms}. Mobilization within ${active.mobilizationDays} days.`,
+        ]
+    ).map((clause, idx) => [`Clause ${idx + 1}`, clause]);
+
+    downloadDocumentPdf({
+      filename: `${active.reference.replace(/\//g, '-')}.pdf`,
+      headerBanner: `${COMPANY_PROFILE.shortName.toUpperCase()} · LETTER OF INTENT`,
+      title: active.clientName,
+      subtitle: `${active.reference} · Dated ${active.issueDate} · ${active.siteName}`,
+      metaPairs: [
+        ['LOI Reference', active.reference],
+        ['Issue Date', active.issueDate],
+        ['Proposal Ref', `${active.proposalId} (${active.approvedProposalVersion})`],
+        ['Term / Start', `${active.durationMonths} Months (${active.startDate})`],
+        ['Payment Terms', active.paymentTerms],
+        ['Mobilization', `${active.mobilizationDays} Days`],
+      ],
+      tableTitle: 'Letter of Intent Terms & Appointment Conditions',
+      tableHeaders: ['Section', 'Terms & Operational Covenant'],
+      tableRows: clauseRows,
+      summaryRows: [
+        ['Annual LOI Value', formatInrFull(active.loiValueAnnual)],
+        ['Security Deposit', formatInrFull(active.securityDeposit)],
+        ['Client SMS Status', active.clientSmsAccepted ? 'SMS Verified' : 'Pending Client SMS'],
+      ],
+      footerNote: `${COMPANY_PROFILE.legalName} · ${COMPANY_PROFILE.corporateOffice}`,
+    });
+  };
 
   return (
     <div className="space-y-5">
@@ -72,17 +108,33 @@ export const LoiView: React.FC<LoiViewProps> = ({
 
         {/* LOI Document & Client SMS Acceptance */}
         <div className="lg:col-span-7 rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+          {/* Corporate Addressee & Actions */}
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-4">
             <div>
               <div className="flex items-center gap-2">
                 <FileCheck2 className="h-4 w-4 text-[#2463EB]" />
                 <span className="font-mono text-xs font-semibold text-[#2463EB]">{active.reference}</span>
+                <span className="text-[11px] text-slate-500 tabular-nums">· Date: {active.issueDate}</span>
               </div>
               <h2 className="text-lg font-bold text-[#14263D] mt-1">{active.clientName}</h2>
-              <p className="text-xs text-slate-600">{active.siteName} · Linked Proposal {active.proposalId} ({active.approvedProposalVersion})</p>
+              <p className="text-xs text-slate-600">
+                {active.siteName} · Linked Proposal {active.proposalId} ({active.approvedProposalVersion})
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Appointed Agency: <span className="font-semibold text-[#14263D]">{COMPANY_PROFILE.legalName}</span> —{' '}
+                {COMPANY_PROFILE.corporateOffice}
+              </p>
             </div>
 
             <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleDownloadLoiPdf}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-[#14263D] hover:bg-slate-50"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download LOI PDF
+              </button>
               {!active.clientSmsAccepted ? (
                 <button
                   type="button"
@@ -155,14 +207,41 @@ export const LoiView: React.FC<LoiViewProps> = ({
             </div>
           </div>
 
-          <div className="rounded-lg border border-slate-200 p-4 text-xs text-slate-700 space-y-2 leading-relaxed">
-            <div className="font-semibold text-[#14263D]">Letter of Intent Summary & Conditions Precedent</div>
+          <div className="rounded-lg border border-slate-200 p-4 text-xs text-slate-700 space-y-3 leading-relaxed">
+            <div className="font-semibold text-[#14263D]">
+              Letter of Intent — Appointment for Integrated Facility Management Services
+            </div>
             <p>
-              This Letter of Intent confirms intent to award Facility Management services at{' '}
-              <span className="font-semibold">{active.siteName}</span> per approved proposal{' '}
-              <span className="font-mono">{active.proposalId} ({active.approvedProposalVersion})</span>.
-              Execution of a formal Service Agreement remains mandatory prior to full mobilization; an LOI is not treated as an executed contract until Stage 04 legal execution.
+              With reference to your quotation and subsequent discussions, <span className="font-semibold">{active.clientName}</span> is
+              pleased to appoint <span className="font-semibold">{COMPANY_PROFILE.legalName}</span> for rendering
+              Facility Management services at <span className="font-semibold">{active.siteName}</span> per approved
+              proposal <span className="font-mono">{active.proposalId} ({active.approvedProposalVersion})</span>.
             </p>
+
+            {active.customClauses && active.customClauses.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="font-semibold text-[#14263D]">Key LOI Covenants & Commercial Clauses</div>
+                <ol className="list-decimal pl-5 space-y-1 text-slate-700">
+                  {active.customClauses.map((clause, idx) => (
+                    <li key={idx}>{clause}</li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            {active.operationalTerms && active.operationalTerms.length > 0 && (
+              <div className="space-y-1.5 border-t border-slate-100 pt-3">
+                <div className="font-semibold text-[#14263D]">
+                  Operational Terms & Conditions (26/27-Day Billing & Compliance)
+                </div>
+                <ol className="list-decimal pl-5 space-y-1 text-slate-700">
+                  {active.operationalTerms.map((term, idx) => (
+                    <li key={idx}>{term}</li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
             <div className="pt-2 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 text-[11px] text-slate-500">
               <span>Authorized Signatory: {active.authorizedSignatory}</span>
               <div className="flex items-center gap-2">

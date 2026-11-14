@@ -191,10 +191,23 @@ export const EmbeddedProjectEmailPanel: React.FC<EmbeddedProjectEmailPanelProps>
                   {activeEmail.body}
                 </pre>
 
-                {activeEmail.attachmentName && (
-                  <div className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-[#F3F6FA] px-2.5 py-1 text-[11px] font-mono text-[#14263D]">
-                    <Paperclip className="h-3 w-3 text-[#2463EB]" />
-                    {activeEmail.attachmentName}
+                {((activeEmail.attachmentNames && activeEmail.attachmentNames.length > 0) ||
+                  activeEmail.attachmentName) && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {(activeEmail.attachmentNames && activeEmail.attachmentNames.length > 0
+                      ? activeEmail.attachmentNames
+                      : activeEmail.attachmentName
+                      ? [activeEmail.attachmentName]
+                      : []
+                    ).map((att) => (
+                      <div
+                        key={att}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-[#F3F6FA] px-2.5 py-1 text-[11px] font-mono text-[#14263D]"
+                      >
+                        <Paperclip className="h-3 w-3 text-[#2463EB]" />
+                        {att}
+                      </div>
+                    ))}
                   </div>
                 )}
 
@@ -444,11 +457,24 @@ export const ProjectEmailSectionView: React.FC<ProjectEmailSectionViewProps> = (
                 </pre>
               </div>
 
-              {activeEmail.attachmentName && (
-                <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-[#F3F6FA] px-3.5 py-2.5 text-xs">
-                  <Paperclip className="h-4 w-4 text-[#2463EB]" />
-                  <span className="font-mono font-semibold text-[#14263D]">{activeEmail.attachmentName}</span>
-                  <span className="text-slate-500">· Attached PDF Document</span>
+              {((activeEmail.attachmentNames && activeEmail.attachmentNames.length > 0) ||
+                activeEmail.attachmentName) && (
+                <div className="flex flex-wrap gap-2">
+                  {(activeEmail.attachmentNames && activeEmail.attachmentNames.length > 0
+                    ? activeEmail.attachmentNames
+                    : activeEmail.attachmentName
+                    ? [activeEmail.attachmentName]
+                    : []
+                  ).map((att) => (
+                    <div
+                      key={att}
+                      className="flex items-center gap-2 rounded-lg border border-slate-200 bg-[#F3F6FA] px-3.5 py-2 text-xs"
+                    >
+                      <Paperclip className="h-3.5 w-3.5 text-[#2463EB]" />
+                      <span className="font-mono font-semibold text-[#14263D]">{att}</span>
+                      <span className="text-slate-500">· Attached PDF</span>
+                    </div>
+                  ))}
                 </div>
               )}
 

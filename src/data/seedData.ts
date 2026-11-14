@@ -15,6 +15,56 @@ import type {
 } from '../types/erp';
 import { calculateCostSheetFinancials } from '../utils/formatters';
 
+export const COMPANY_PROFILE = {
+  legalName: 'Vinshar Integrated Services Pvt. Ltd.',
+  shortName: 'Vinshar Integrated Services',
+  corporateOffice:
+    'Office No. 33, 2nd Floor, Loonet Building, Dr. B.R. Ambedkar Road, Opposite Chitra Cinema, Dadar East, Mumbai 400014',
+  email: 'operations@vinsharservices.in',
+  phone: '+919820144510',
+};
+
+export const VINSHAR_PROPOSAL_INTRO = `Greeting from Vinshar Integrated Services!!!
+
+We are pleased to introduce ourselves as an Integrated Facilities Management Services (IFMS) company. We are a team of experts from varied fields such as Real-Estate & Infrastructure, Building Services, Safety & Security Systems, and Building Management & Energy Management Systems.
+
+We are a leading service provider for Housekeeping and Facility Management services. The services are offered individually or integrated to provide 'Total Property Management Solutions'. Whatever be the option, our services are always tailored to suit your operational needs.
+
+We provide facilities management solutions for Operation, Maintenance, Improvement, and Renovation in building utility systems across verticals such as Residential Towers, Hotels, Hospitals, Shopping Malls, Large Commercial Complexes, Research Labs & IT Parks.
+
+We can add value to your organization by partnering with you and offering our expert services in managing your facilities to enhance productivity and reduce operating costs such as electricity bills, water consumption, and manpower planning.`;
+
+export const VINSHAR_PROPERTY_MGMT_TERMS: string[] = [
+  'The staff employed by us will be solely under our supervision, though any appropriate suggestion will always be welcome.',
+  'Payment terms: Monthly payment to be made within 7 days of the submission of our bills.',
+  'Rates will be revised as per Minimum Wages revision (Government notification).',
+  'Rate will be revised as per mutual agreement after completion of one year.',
+  'All employees will be covered under all labour and statutory compliances such as ESIC / PF and applicable statutory rules.',
+  'Uniforms will be given to all the staff along with ID cards.',
+  'There will be a non-poaching agreement between the service provider and the client.',
+];
+
+export const VINSHAR_HOUSEKEEPING_TERMS: string[] = [
+  'The staff employed by us will be solely under our supervision, though any appropriate suggestion will always be welcome.',
+  'Payment terms: Monthly payment to be made within 7 days of the submission of our bills.',
+  'For Non-Compliance rates, yearly revisions are applicable and compliance liability rests on the Principal Employer.',
+  'For SLA-base contract, yearly revisions are applicable and compliance liability rests on us (Agency).',
+  'Rate will be revised as per mutual agreement after completion of one year.',
+  'Housekeeping material will be chargeable on a Lumpsum basis.',
+  'All employees will be covered under the Group Insurance Policy.',
+  '2 sets of uniforms with safety shoes along with seasonal wear and ID cards will be provided to all staff.',
+  'Yearly bonus will be provided at the time of Diwali.',
+];
+
+export const VINSHAR_OPERATIONAL_TERMS: string[] = [
+  'All manpower rates are for 26/27 days/month (excluding weekly offs); quoted rates are for Full Day 8-hour duty for Soft Services.',
+  'All housekeeping material, toiletries & supplies will be supplied by the client or supported by delivery challans where applicable.',
+  'Current rates are drawn up as per Minimum Wages applicable July-26 to Dec-26; 18% GST applies extra on total quoted amount.',
+  'Contract period: 3 years extendable by 2 years; yearly cost escalation 10% flat for coming 3 years.',
+  'Work on Statutory Holidays (26th Jan, 1st May, 15th Aug, 2nd Oct) will be double billed with compensatory off; 12 festival holidays/year for management staff.',
+  'Electricity, water, on-site storage for equipment/consumables, dirt/garbage collection area, and first-aid kits shall be provided by the client.',
+];
+
 export const INDUSTRY_TEMPLATES: Array<{
   category: IndustryCategory;
   typicalFacilities: string;
@@ -184,6 +234,39 @@ export const INITIAL_CLIENTS: ClientRecord[] = [
     status: 'Active',
     createdAt: '2024-09-25',
   },
+  {
+    id: 'CLI-007',
+    companyName: 'Seawoods Residences D4-D8 CHSL',
+    industry: 'Residential',
+    contactPerson: 'Managing Committee Secretary',
+    designation: 'Hon. Secretary, Co-op Housing Society',
+    email: 'committee@seawoodsd4d8.in',
+    mobile: '+919820551108',
+    mobileVerified: true,
+    mobileVerifiedAt: '2026-08-25T11:00:00.000Z',
+    billingAddress: 'Seawoods Residences D4-D8 CHSL, Nerul, Navi Mumbai 400706',
+    siteAddress: 'Seawoods Residences D4-D8, Nerul, Navi Mumbai 400706',
+    gstin: '27AAACS4912D1Z3',
+    pan: 'AAACS4912D',
+    status: 'Active',
+    createdAt: '2026-08-27',
+  },
+  {
+    id: 'CLI-008',
+    companyName: 'Flushel Apartments',
+    industry: 'Residential',
+    contactPerson: 'Society Treasurer & Management',
+    designation: 'Managing Committee',
+    email: 'office@flushelbandra.in',
+    mobile: '+919821334900',
+    mobileVerified: false,
+    billingAddress: 'Flushel Apartments, Bandra West, Mumbai 400050',
+    siteAddress: 'Flushel Apartments, Bandra West, Mumbai 400050',
+    gstin: '27AAACF8120M1Z7',
+    pan: 'AAACF8120M',
+    status: 'Active',
+    createdAt: '2026-08-18',
+  },
 ];
 
 export const INITIAL_OPPORTUNITIES: OpportunityRecord[] = [
@@ -267,7 +350,146 @@ const greenfieldItemsV2 = greenfieldItemsV1.map((item) =>
 );
 const gfFinV2 = calculateCostSheetFinancials(greenfieldItemsV2, 'margin', 11.5, 1.5, 12);
 
+// Seawoods Residences D4-D8 CHSL (Property Manager + 4 Shift Engineers)
+const seawoodsItemsV1: CostSheetLineItem[] = [
+  {
+    id: 'SW-1',
+    category: 'Manpower',
+    service: 'Management',
+    designationOrItem: 'Property Manager',
+    shiftOrUnit: 'General Shift (26 Days/Mo)',
+    quantity: 1,
+    unitRate: 130009,
+    statutoryPct: 0,
+  },
+  {
+    id: 'SW-2',
+    category: 'Manpower',
+    service: 'Technical Maintenance',
+    designationOrItem: 'Shift Engineer',
+    shiftOrUnit: 'Rotational Shifts (26 Days/Mo)',
+    quantity: 4,
+    unitRate: 52194.29,
+    statutoryPct: 0,
+  },
+];
+const seawoodsFinV1 = calculateCostSheetFinancials(seawoodsItemsV1, 'markup', 10, 0, 24);
+
+// Flushel Apartments Bandra West (V1 Non-Compliance 8% Mgmt Fee, V2 Lumpsum/SLA 10% Mgmt Fee)
+const flushelItemsV1: CostSheetLineItem[] = [
+  { id: 'FL-1', category: 'Manpower', service: 'Housekeeping', designationOrItem: 'Housekeeper (8 Hours / 26 Days)', shiftOrUnit: '8 Hrs / 26 Days', quantity: 4, unitRate: 18500, statutoryPct: 0 },
+  { id: 'FL-2', category: 'Manpower', service: 'Front Office / Helpdesk', designationOrItem: 'Valet Parking Driver (10 Hours)', shiftOrUnit: '10 Hrs / 26 Days', quantity: 1, unitRate: 25000, statutoryPct: 0 },
+  { id: 'FL-3', category: 'Manpower', service: 'Housekeeping', designationOrItem: 'Team Leader', shiftOrUnit: 'General Shift', quantity: 1, unitRate: 21000, statutoryPct: 0 },
+  { id: 'FL-4', category: 'Materials & Consumables', service: 'Housekeeping', designationOrItem: 'Material / Chemicals & Consumables (Lumpsum)', shiftOrUnit: 'Monthly Lumpsum', quantity: 1, unitRate: 7000, statutoryPct: 0 },
+  { id: 'FL-5', category: 'Equipment', service: 'Housekeeping', designationOrItem: 'Machinery Rentals (Jet / Single Disk / Vacuum-1)', shiftOrUnit: 'Monthly Rental', quantity: 1, unitRate: 6000, statutoryPct: 0 },
+  { id: 'FL-6', category: 'Manpower', service: 'Security', designationOrItem: 'Security Guard (Day Shift - Main Gate)', shiftOrUnit: '12 Hrs / 26 Days', quantity: 2, unitRate: 22000, statutoryPct: 0 },
+  { id: 'FL-7', category: 'Manpower', service: 'Security', designationOrItem: 'Security Guard (Night Shift - Main Gate)', shiftOrUnit: '12 Hrs / 26 Days', quantity: 2, unitRate: 22000, statutoryPct: 0 },
+  { id: 'FL-8', category: 'Manpower', service: 'Security', designationOrItem: 'Security Guard (Night Shift - Back Gate)', shiftOrUnit: '12 Hrs / 26 Days', quantity: 2, unitRate: 22000, statutoryPct: 0 },
+  { id: 'FL-9', category: 'Manpower', service: 'Security', designationOrItem: 'Lobby Supervisor (Day-1, Night-1)', shiftOrUnit: '12 Hrs / 26 Days', quantity: 2, unitRate: 25000, statutoryPct: 0 },
+  { id: 'FL-10', category: 'Manpower', service: 'Security', designationOrItem: 'Reliever (To Manage Weekly Offs)', shiftOrUnit: 'Rotational Offs', quantity: 1, unitRate: 22000, statutoryPct: 0 },
+];
+const flushelFinV1 = calculateCostSheetFinancials(flushelItemsV1, 'markup', 8, 0, 12);
+
+const flushelItemsV2: CostSheetLineItem[] = [
+  { id: 'FL2-1', category: 'Manpower', service: 'Housekeeping', designationOrItem: 'Housekeeper (8 Hours / 26 Days - SLA Base)', shiftOrUnit: '8 Hrs / 26 Days', quantity: 4, unitRate: 19250, statutoryPct: 0 },
+  { id: 'FL2-2', category: 'Manpower', service: 'Front Office / Helpdesk', designationOrItem: 'Valet Parking Driver (10 Hours - SLA Base)', shiftOrUnit: '10 Hrs / 26 Days', quantity: 1, unitRate: 26000, statutoryPct: 0 },
+  { id: 'FL2-3', category: 'Manpower', service: 'Housekeeping', designationOrItem: 'Team Leader (SLA Base)', shiftOrUnit: 'General Shift', quantity: 1, unitRate: 22000, statutoryPct: 0 },
+  { id: 'FL2-4', category: 'Materials & Consumables', service: 'Housekeeping', designationOrItem: 'Material / Chemicals & Consumables (Lumpsum)', shiftOrUnit: 'Monthly Lumpsum', quantity: 1, unitRate: 7000, statutoryPct: 0 },
+  { id: 'FL2-5', category: 'Equipment', service: 'Housekeeping', designationOrItem: 'Machinery Rentals (Jet / Single Disk / Vacuum-1)', shiftOrUnit: 'Monthly Rental', quantity: 1, unitRate: 6000, statutoryPct: 0 },
+  { id: 'FL2-6', category: 'Manpower', service: 'Security', designationOrItem: 'Security Guard (Day Shift - Main Gate)', shiftOrUnit: '12 Hrs / 26 Days', quantity: 2, unitRate: 22500, statutoryPct: 0 },
+  { id: 'FL2-7', category: 'Manpower', service: 'Security', designationOrItem: 'Security Guard (Night Shift - Main Gate)', shiftOrUnit: '12 Hrs / 26 Days', quantity: 2, unitRate: 22500, statutoryPct: 0 },
+  { id: 'FL2-8', category: 'Manpower', service: 'Security', designationOrItem: 'Security Guard (Night Shift - Back Gate)', shiftOrUnit: '12 Hrs / 26 Days', quantity: 2, unitRate: 22500, statutoryPct: 0 },
+  { id: 'FL2-9', category: 'Manpower', service: 'Security', designationOrItem: 'Lobby Supervisor (Day-1, Night-1)', shiftOrUnit: '12 Hrs / 26 Days', quantity: 2, unitRate: 26000, statutoryPct: 0 },
+  { id: 'FL2-10', category: 'Manpower', service: 'Security', designationOrItem: 'Reliever (To Manage Weekly Offs)', shiftOrUnit: 'Rotational Offs', quantity: 1, unitRate: 23000, statutoryPct: 0 },
+];
+const flushelFinV2 = calculateCostSheetFinancials(flushelItemsV2, 'markup', 10, 0, 12);
+
 export const INITIAL_PROPOSALS: ProposalRecord[] = [
+  {
+    id: 'PROP-2026-001',
+    reference: 'VIS/PROP/2026/001',
+    opportunityId: 'OPP-2026-SW',
+    clientId: 'CLI-007',
+    industry: 'Residential',
+    siteName: 'Seawoods Residences D4-D8, Nerul, Navi Mumbai',
+    selectedServices: ['Technical Maintenance', 'Front Office / Helpdesk'],
+    contractDurationMonths: 24,
+    validityDate: '2026-09-26',
+    currentVersion: 'V1',
+    proposalDate: '27th Aug 2026',
+    subject: 'Proposal for providing Property Manager and Shift Engineer manpower at Seawoods, Nerul, Navi Mumbai.',
+    introLetter: VINSHAR_PROPOSAL_INTRO,
+    termsAndConditions: VINSHAR_PROPERTY_MGMT_TERMS,
+    gstNote: 'GST will be charged extra @18%. Monthly payment within 7 days of bill submission.',
+    versions: [
+      {
+        version: 'V1',
+        createdAt: '2026-08-27T10:00:00.000Z',
+        createdBy: 'Vinshar Estimation Desk',
+        reason: 'Annexure-II Cost Sheet — Property Manager (1) & Shift Engineers (4) with 10% Management Fee',
+        clientFeedback: 'LOI signed effective 04th Sept 2026 (2 years extendable by 2 years).',
+        pricingMode: 'markup',
+        serviceChargePct: 10,
+        discountPct: 0,
+        gstPct: 18,
+        lineItems: seawoodsItemsV1,
+        ...seawoodsFinV1,
+        status: 'Approved',
+        smsVerifiedApproval: true,
+        approvedBy: 'Rohit Sharma (Director)',
+        approvedAt: '2026-08-28T14:30:00.000Z',
+      },
+    ],
+  },
+  {
+    id: 'PROP-2026-002',
+    reference: 'VIS/PROP/2026/002',
+    opportunityId: 'OPP-2026-FL',
+    clientId: 'CLI-008',
+    industry: 'Residential',
+    siteName: 'Flushel Apartments, Bandra West, Mumbai',
+    selectedServices: ['Housekeeping', 'Security', 'Front Office / Helpdesk'],
+    contractDurationMonths: 12,
+    validityDate: '2026-09-18',
+    currentVersion: 'V1',
+    proposalDate: '18th Aug 2026',
+    subject: 'Proposal for Housekeeping & Security Services at Flushel Apartments (Bandra West).',
+    introLetter: VINSHAR_PROPOSAL_INTRO,
+    termsAndConditions: VINSHAR_HOUSEKEEPING_TERMS,
+    gstNote: 'GST will be charged extra @18%. Non-Compliance (8% Fee) vs SLA Base (10% Fee) versions included.',
+    versions: [
+      {
+        version: 'V1',
+        createdAt: '2026-08-18T11:00:00.000Z',
+        createdBy: 'Vinshar Estimation Desk',
+        reason: 'Annexure-II Cost Sheet (Non-Compliance Manpower Base — 14 Staff, 8% Management Fee)',
+        clientFeedback: 'Compare with V2 Lumpsum / SLA Base option (10% Management Fee).',
+        pricingMode: 'markup',
+        serviceChargePct: 8,
+        discountPct: 0,
+        gstPct: 18,
+        lineItems: flushelItemsV1,
+        ...flushelFinV1,
+        status: 'Shared with Client',
+        smsVerifiedApproval: false,
+      },
+      {
+        version: 'V2',
+        createdAt: '2026-08-18T11:15:00.000Z',
+        createdBy: 'Vinshar Estimation Desk',
+        reason: 'Annexure-II Cost Sheet (Lumpsum / SLA Base — Agency Statutory Compliance, 10% Mgmt Fee)',
+        clientFeedback: 'Option 2 SLA compliant quote submitted alongside Non-Compliance V1.',
+        pricingMode: 'markup',
+        serviceChargePct: 10,
+        discountPct: 0,
+        gstPct: 18,
+        lineItems: flushelItemsV2,
+        ...flushelFinV2,
+        status: 'Shared with Client',
+        smsVerifiedApproval: false,
+      },
+    ],
+  },
   {
     id: 'PROP-2025-014',
     reference: 'FM/PROP/2025/014',
@@ -380,6 +602,35 @@ export const INITIAL_ATTRITION: AttritionRecord[] = [
 ];
 
 export const INITIAL_LOIS: LoiRecord[] = [
+  {
+    id: 'LOI-2026-001',
+    reference: 'VIS/LOI/2026/001',
+    proposalId: 'PROP-2026-001',
+    approvedProposalVersion: 'V1',
+    clientId: 'CLI-007',
+    clientName: 'Seawoods Residences D4-D8 CO-HSG LTD',
+    siteName: 'Seawoods Residences D4-D8, Nerul, Navi Mumbai',
+    issueDate: '2026-09-04',
+    loiValueAnnual: seawoodsFinV1.annualContractValue,
+    durationMonths: 24,
+    startDate: '2026-10-04',
+    paymentTerms: 'Within 07 Days from Date of Invoice Receipt',
+    securityDeposit: 372665,
+    mobilizationDays: 30,
+    authorizedSignatory: 'Vinshar Integrated Services Pvt. Ltd.',
+    status: 'Accepted',
+    clientContactMobile: '+919820551108',
+    clientSmsAccepted: true,
+    clientSmsAcceptedAt: '2026-09-04T15:20:00.000Z',
+    customClauses: [
+      'The agreement will be for a period of 2 years and extendable for two more years. Either party can give 60 days notice to terminate the contract during the agreement period post 60 days of cool-off period.',
+      'The staff under minimum wages will have rate revision as per Maharashtra Government DA notifications from time to time.',
+      'Rate will be revised yearly at 10% or with mutual agreement.',
+      'The deployment numbers are based on the BOQ/input received from the client. During services, Vinshar may suggest changing deployment numbers and changes take effect only after client approval.',
+      'Payments will be released within 07 days from the date of receipt of invoices; formal agreement to be executed within 30 days from signed LOI.',
+    ],
+    operationalTerms: VINSHAR_OPERATIONAL_TERMS,
+  },
   {
     id: 'LOI-2025-004',
     reference: 'FM/LOI/2025/004',
@@ -529,6 +780,36 @@ export const INITIAL_PROJECTS: ProjectRecord[] = [
       { id: 'CHK-7', label: 'Site access & mobilization dates confirmed', ownerDept: 'Operations', completed: false },
       { id: 'CHK-8', label: 'Ops, HR & Finance coordinators assigned', ownerDept: 'Management', completed: true, verifiedBy: 'Rohit Sharma' },
       { id: 'CHK-9', label: 'Statutory & compliance documents uploaded', ownerDept: 'HR / Legal', completed: false },
+    ],
+  },
+  {
+    id: 'PRJ-003',
+    code: 'VIS-PRJ-2026-01',
+    clientId: 'CLI-007',
+    clientName: 'Seawoods Residences D4-D8 CHSL',
+    siteName: 'Seawoods Residences D4-D8, Nerul, Navi Mumbai',
+    industry: 'Residential',
+    agreementId: 'LOI-2026-001',
+    monthlyBilling: 372665,
+    annualValue: 4471980,
+    approvedManpower: 5,
+    startDate: '2026-10-04',
+    mobilizationDate: '2026-09-25',
+    opsManager: 'Karan Malhotra',
+    hrCoordinator: 'Priya Nair',
+    financeCoordinator: 'Suresh Iyer',
+    closingStatus: 'Ready for Mobilization',
+    activationSmsSent: false,
+    checklist: [
+      { id: 'CHK-1', label: 'Final proposal version approved and linked (VIS/PROP/2026/001)', ownerDept: 'Sales', completed: true, verifiedBy: 'Rohit Sharma' },
+      { id: 'CHK-2', label: 'LOI accepted effective 04th Sept 2026 (30-day deployment)', ownerDept: 'Sales / Legal', completed: true, verifiedBy: 'Rohit Sharma' },
+      { id: 'CHK-3', label: 'Formal 2+2 year Service Agreement executed within 30 days', ownerDept: 'Legal', completed: false },
+      { id: 'CHK-4', label: 'Property Manager (1) & Shift Engineers (4) Cost Sheet approved', ownerDept: 'Estimation', completed: true, verifiedBy: 'Arjun Patel' },
+      { id: 'CHK-5', label: 'Society billing details & 7-day payment terms verified', ownerDept: 'Finance', completed: true, verifiedBy: 'Suresh Iyer' },
+      { id: 'CHK-6', label: 'Manpower deployment plan (26 days/month) approved', ownerDept: 'Operations', completed: true, verifiedBy: 'Karan Malhotra' },
+      { id: 'CHK-7', label: 'Site storage, electricity & water access confirmed', ownerDept: 'Operations', completed: false },
+      { id: 'CHK-8', label: 'Ops, HR & Finance coordinators assigned', ownerDept: 'Management', completed: true, verifiedBy: 'Rohit Sharma' },
+      { id: 'CHK-9', label: 'EPF / ESIC & Maharashtra Min Wage compliance uploaded', ownerDept: 'HR / Legal', completed: true, verifiedBy: 'Priya Nair' },
     ],
   },
 ];

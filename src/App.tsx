@@ -71,6 +71,7 @@ import type {
   UserAccount,
 } from './types/erp';
 import { calculateCostSheetFinancials, formatInrFull } from './utils/formatters';
+import { buildVirtualDocumentVault } from './utils/virtualFileSystem';
 
 const EMAILS_STORAGE_KEY = 'fm_erp_project_emails_v1';
 const SNAPSHOTS_STORAGE_KEY = 'fm_erp_doc_snapshots_v1';
@@ -211,6 +212,18 @@ export default function App() {
   const activeUser = useMemo(
     () => users.find((u) => u.id === activeUserId) || users[0],
     [users, activeUserId]
+  );
+
+  const vaultFiles = useMemo(
+    () =>
+      buildVirtualDocumentVault({
+        clients,
+        proposals,
+        invoices,
+        projects,
+        docSnapshots,
+      }),
+    [clients, proposals, invoices, projects, docSnapshots]
   );
 
   const refreshSmsLedger = useCallback(async () => {
@@ -448,7 +461,9 @@ export default function App() {
     setDocSnapshots((prev) => [snap, ...prev]);
   };
 
-  const handleSendProjectEmail = (ctx: EmailComposeContext & { attachPdf: boolean }) => {
+  const handleSendProjectEmail = (
+    ctx: EmailComposeContext & { attachPdf: boolean; attachmentNames: string[] }
+  ) => {
     const newRecord: ProjectEmailRecord = {
       id: `EM-${Date.now().toString(36).toUpperCase()}`,
       projectId: ctx.projectId,
@@ -464,7 +479,8 @@ export default function App() {
       ccEmails: ctx.ccEmails || '',
       subject: ctx.subject,
       body: ctx.body,
-      attachmentName: ctx.attachPdf ? ctx.attachmentName : undefined,
+      attachmentName: ctx.attachPdf ? ctx.attachmentNames[0] || ctx.attachmentName : undefined,
+      attachmentNames: ctx.attachPdf ? ctx.attachmentNames : [],
       status: 'Delivered',
       sentAt: new Date().toISOString(),
       sentBy: activeUser.name,
@@ -1094,9 +1110,10 @@ export default function App() {
         }}
       />
 
-      {/* Unified Email Composer Modal (Proposal, Invoice & Project) */}
+      {/* Unified Email Composer Modal (Proposal, Invoice & Project + ERP File System) */}
       <EmailComposeModal
         context={emailComposeContext}
+        vaultFiles={vaultFiles}
         senderEmail={activeUser.email}
         senderName={activeUser.name}
         onClose={() => setEmailComposeContext(null)}

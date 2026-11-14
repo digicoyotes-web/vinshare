@@ -8,7 +8,14 @@ import {
   ShieldCheck,
   Trash2,
 } from 'lucide-react';
-import { INDUSTRY_TEMPLATES, SERVICE_MASTER } from '../data/seedData';
+import {
+  COMPANY_PROFILE,
+  INDUSTRY_TEMPLATES,
+  SERVICE_MASTER,
+  VINSHAR_HOUSEKEEPING_TERMS,
+  VINSHAR_PROPERTY_MGMT_TERMS,
+  VINSHAR_PROPOSAL_INTRO,
+} from '../data/seedData';
 import type {
   ClientRecord,
   CostSheetLineItem,
@@ -206,22 +213,33 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
     });
     const fin = calculateCostSheetFinancials(lineItems, 'margin', template.defaultMarginPct, 0, wizDuration);
     const id = `PROP-2025-${String(proposals.length + 20).padStart(3, '0')}`;
+    const todayLabel = new Date().toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+    const usesHousekeepingTerms = wizServices.includes('Housekeeping') && wizServices.length <= 3;
     const newProposal: ProposalRecord = {
       id,
-      reference: `FM/PROP/2025/${String(proposals.length + 20).padStart(3, '0')}`,
+      reference: `VIS/PROP/2026/${String(proposals.length + 20).padStart(3, '0')}`,
       opportunityId: 'OPP-NEW',
       clientId: client.id,
       industry: wizIndustry,
       siteName: wizSiteName.trim() || client.siteAddress,
       selectedServices: wizServices,
       contractDurationMonths: wizDuration,
-      validityDate: '2025-02-28',
+      validityDate: '2026-12-31',
       currentVersion: 'V1',
+      proposalDate: todayLabel,
+      subject: `Proposal for providing ${wizServices.join(', ')} services at ${wizSiteName.trim() || client.siteAddress}.`,
+      introLetter: VINSHAR_PROPOSAL_INTRO,
+      termsAndConditions: usesHousekeepingTerms ? VINSHAR_HOUSEKEEPING_TERMS : VINSHAR_PROPERTY_MGMT_TERMS,
+      gstNote: 'GST will be charged extra @18%.',
       versions: [
         {
           version: 'V1',
           createdAt: new Date().toISOString(),
-          createdBy: 'Rohit Sharma',
+          createdBy: 'Vinshar Estimation Desk',
           reason: `Generated from ${wizIndustry} industry template`,
           clientFeedback: '',
           pricingMode: 'margin',
@@ -253,20 +271,21 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
   };
 
   const handleDownloadProposalPdf = () => {
+    const mgmtFeeAmount = Math.max(0, activeVersion.monthlySellingPrice - activeVersion.totalOperatingCost);
     downloadDocumentPdf({
       filename: proposalPdfName,
-      headerBanner: 'FACILITY MANAGEMENT ERP · COMMERCIAL PROPOSAL',
+      headerBanner: `${COMPANY_PROFILE.shortName.toUpperCase()} · COMMERCIAL PROPOSAL`,
       title: `${activeClient?.companyName || activeProposal.clientId}`,
       subtitle: `${activeProposal.reference} (${activeVersion.version}) · ${activeProposal.siteName}`,
       metaPairs: [
         ['Proposal Ref', activeProposal.reference],
+        ['Proposal Date', activeProposal.proposalDate || activeProposal.validityDate],
         ['Version / Status', `${activeVersion.version} (${activeVersion.status})`],
         ['Client Contact', `${activeClient?.contactPerson || 'Authorized Signatory'}`],
-        ['Industry Sector', activeProposal.industry],
         ['Contract Term', `${activeProposal.contractDurationMonths} Months`],
         ['Valid Until', activeProposal.validityDate],
       ],
-      tableTitle: 'Commercial Cost Breakdown (Monthly)',
+      tableTitle: 'Annexure II - Cost Sheet Breakdown (Monthly)',
       tableHeaders: ['Category', 'Particulars', 'Qty', 'Monthly Total'],
       tableRows: activeVersion.lineItems.map((item) => [
         item.category,
@@ -275,13 +294,16 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
         formatInrFull(Math.round(item.quantity * item.unitRate * (1 + item.statutoryPct / 100))),
       ]),
       summaryRows: [
-        ['Direct Operating Cost / Mo', formatInrFull(activeVersion.directCost)],
-        ['Site Overheads / Mo', formatInrFull(activeVersion.overheadCost)],
-        ['Total Cost / Mo', formatInrFull(activeVersion.totalOperatingCost)],
-        ['Monthly Selling Price', formatInrFull(activeVersion.monthlySellingPrice)],
+        ['Subtotal (Total - A)', formatInrFull(activeVersion.totalOperatingCost)],
+        [
+          `${activeVersion.pricingMode === 'markup' ? 'Management Fee' : 'Target Margin'} @${activeVersion.serviceChargePct}%`,
+          formatInrFull(mgmtFeeAmount),
+        ],
+        ['Monthly Total (Total - B)', formatInrFull(activeVersion.monthlySellingPrice)],
+        ['GST Note', activeProposal.gstNote || 'GST @18% Extra'],
         ['Annual Contract Value', formatInrFull(activeVersion.annualContractValue)],
       ],
-      footerNote: `Prepared by ${activeVersion.createdBy} · Services: ${activeProposal.selectedServices.join(', ')}`,
+      footerNote: `${COMPANY_PROFILE.legalName} · ${COMPANY_PROFILE.corporateOffice}`,
     });
   };
 
@@ -418,19 +440,58 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
 
       {showPreview ? (
         <div className="rounded-xl border border-slate-200 bg-white p-8 max-w-4xl mx-auto space-y-6">
-          <div className="flex items-start justify-between border-b border-slate-200 pb-5">
+          {/* Corporate Letterhead */}
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 border-b border-slate-200 pb-5">
             <div>
-              <div className="text-xs font-semibold text-[#2463EB]">COMMERCIAL PROPOSAL</div>
-              <h2 className="text-2xl font-bold text-[#14263D] mt-1">{activeClient?.companyName}</h2>
-              <p className="text-xs text-slate-600 mt-1">{activeProposal.siteName}</p>
+              <div className="text-[11px] font-bold tracking-wider uppercase text-[#2463EB]">
+                {COMPANY_PROFILE.legalName}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1 max-w-md leading-relaxed">
+                Corporate Office: {COMPANY_PROFILE.corporateOffice}
+              </p>
+              <div className="text-[11px] text-slate-500 mt-1">
+                {COMPANY_PROFILE.email} · {COMPANY_PROFILE.phone}
+              </div>
             </div>
-            <div className="text-right text-xs text-slate-600 tabular-nums">
+            <div className="text-left sm:text-right text-xs text-slate-600 tabular-nums shrink-0">
               <div className="font-mono font-semibold text-[#14263D]">{activeProposal.reference}</div>
-              <div>Version: {activeVersion.version}</div>
+              <div>Date: {activeProposal.proposalDate || activeProposal.validityDate}</div>
+              <div>Version: {activeVersion.version} ({activeVersion.status})</div>
               <div>Valid Until: {activeProposal.validityDate}</div>
             </div>
           </div>
 
+          {/* Recipient & Subject */}
+          <div className="space-y-2 text-xs text-slate-700">
+            <div className="font-semibold text-[#14263D]">To,</div>
+            <div className="font-bold text-sm text-[#14263D]">{activeClient?.companyName}</div>
+            <div className="text-slate-600">{activeProposal.siteName}</div>
+            <div className="pt-2 rounded-lg bg-[#F3F6FA] border border-slate-200 px-3.5 py-2.5 font-semibold text-[#14263D]">
+              Sub:{' '}
+              {activeProposal.subject ||
+                `Proposal for providing ${activeProposal.selectedServices.join(', ')} services at ${activeProposal.siteName}.`}
+            </div>
+          </div>
+
+          {/* Cover Letter Body */}
+          <div className="space-y-2.5 text-xs text-slate-700 leading-relaxed border-b border-slate-100 pb-5">
+            <p className="font-semibold text-[#14263D]">Dear Sir / Madam,</p>
+            {(activeProposal.introLetter || VINSHAR_PROPOSAL_INTRO)
+              .split('\n\n')
+              .map((paragraph, idx) => (
+                <p key={idx}>{paragraph}</p>
+              ))}
+            <p>
+              We are enclosing herewith our facilities management services proposal and Annexure-II Cost Sheet.
+              We hope it serves your operational purpose and look forward to a healthy business association in the near future.
+            </p>
+            <div className="pt-2">
+              <div className="text-slate-600">Yours faithfully,</div>
+              <div className="font-bold text-[#14263D] mt-0.5">For {COMPANY_PROFILE.legalName}</div>
+            </div>
+          </div>
+
+          {/* Key Commercial Metrics Strip */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 rounded-lg bg-[#F3F6FA] p-4 border border-slate-200">
             <div>
               <div className="text-[11px] text-slate-500">Industry Sector</div>
@@ -441,7 +502,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
               <div className="text-xs font-semibold text-[#14263D]">{activeProposal.contractDurationMonths} Months</div>
             </div>
             <div>
-              <div className="text-[11px] text-slate-500">Monthly Commercials</div>
+              <div className="text-[11px] text-slate-500">Monthly Commercials (Total B)</div>
               <div className="text-xs font-bold text-[#14263D] tabular-nums">
                 {formatInrFull(activeVersion.monthlySellingPrice)}
               </div>
@@ -465,30 +526,84 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
             </div>
           </div>
 
+          {/* Annexure II Cost Sheet */}
           <div>
-            <h3 className="text-sm font-semibold text-[#14263D] mb-2">Commercial Cost Breakdown</h3>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-[#14263D]">
+                Annexure – II – Cost Sheet ({activeClient?.companyName})
+              </h3>
+              <span className="text-[11px] font-medium text-slate-500">
+                {activeVersion.reason}
+              </span>
+            </div>
             <table className="w-full text-left text-xs border border-slate-200">
               <thead className="bg-[#F3F6FA] text-slate-600">
                 <tr>
+                  <th className="px-3 py-2 font-medium">Sr.</th>
                   <th className="px-3 py-2 font-medium">Category</th>
                   <th className="px-3 py-2 font-medium">Particulars</th>
-                  <th className="px-3 py-2 font-medium text-right">Qty</th>
-                  <th className="px-3 py-2 font-medium text-right">Monthly Total</th>
+                  <th className="px-3 py-2 font-medium text-right">Total Nos</th>
+                  <th className="px-3 py-2 font-medium text-right">Unit Cost</th>
+                  <th className="px-3 py-2 font-medium text-right">Total Amount</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {activeVersion.lineItems.map((item) => (
+                {activeVersion.lineItems.map((item, idx) => (
                   <tr key={item.id}>
+                    <td className="px-3 py-2 text-slate-500 tabular-nums">{idx + 1}</td>
                     <td className="px-3 py-2 text-slate-600">{item.category}</td>
                     <td className="px-3 py-2 font-medium text-[#14263D]">{item.designationOrItem}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{item.quantity}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatInrFull(item.unitRate)}</td>
                     <td className="px-3 py-2 text-right font-medium tabular-nums">
-                      {formatInrFull(item.quantity * item.unitRate * (1 + item.statutoryPct / 100))}
+                      {formatInrFull(Math.round(item.quantity * item.unitRate * (1 + item.statutoryPct / 100)))}
                     </td>
                   </tr>
                 ))}
               </tbody>
+              <tfoot className="bg-[#F3F6FA] border-t border-slate-200 text-xs">
+                <tr>
+                  <td colSpan={5} className="px-3 py-2 font-semibold text-slate-700 text-right">
+                    TOTAL - A (Direct & Site Subtotal)
+                  </td>
+                  <td className="px-3 py-2 text-right font-semibold text-[#14263D] tabular-nums">
+                    {formatInrFull(activeVersion.totalOperatingCost)}
+                  </td>
+                </tr>
+                <tr>
+                  <td colSpan={5} className="px-3 py-2 text-slate-600 text-right">
+                    Management Fee / {activeVersion.pricingMode === 'markup' ? 'Markup' : 'Margin'} @{activeVersion.serviceChargePct}%
+                  </td>
+                  <td className="px-3 py-2 text-right font-medium text-[#14263D] tabular-nums">
+                    {formatInrFull(Math.max(0, activeVersion.monthlySellingPrice - activeVersion.totalOperatingCost))}
+                  </td>
+                </tr>
+                <tr className="border-t border-slate-200">
+                  <td colSpan={5} className="px-3 py-2.5 font-bold text-[#14263D] text-right">
+                    TOTAL - B (Monthly Commercial Total)
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-bold text-[#2463EB] tabular-nums">
+                    {formatInrFull(activeVersion.monthlySellingPrice)}
+                  </td>
+                </tr>
+              </tfoot>
             </table>
+            <p className="mt-2 text-[11px] font-semibold text-amber-800 bg-[#FFF2E5] inline-block px-2.5 py-1 rounded">
+              Note: {activeProposal.gstNote || 'GST will be charged extra @18%.'}
+            </p>
+          </div>
+
+          {/* Terms and Conditions */}
+          <div className="border-t border-slate-200 pt-4">
+            <h3 className="text-sm font-semibold text-[#14263D] mb-2">Terms and Conditions</h3>
+            <ol className="list-decimal pl-5 space-y-1.5 text-xs text-slate-700 leading-relaxed">
+              {(activeProposal.termsAndConditions && activeProposal.termsAndConditions.length > 0
+                ? activeProposal.termsAndConditions
+                : VINSHAR_PROPERTY_MGMT_TERMS
+              ).map((term, idx) => (
+                <li key={idx}>{term}</li>
+              ))}
+            </ol>
           </div>
         </div>
       ) : (
