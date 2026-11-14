@@ -1,26 +1,45 @@
 import React, { useState } from 'react';
 import { CheckCircle2, Plus, Printer, Receipt, ShieldCheck } from 'lucide-react';
-import type { ClientRecord, InvoiceRecord, ProjectRecord } from '../types/erp';
+import type {
+  ClientRecord,
+  DocumentVersionSnapshot,
+  InvoiceRecord,
+  ProjectRecord,
+} from '../types/erp';
 import { formatInrFull } from '../utils/formatters';
+import { downloadDocumentPdf } from '../utils/pdfGenerator';
+import { DocumentActionBar } from './DocumentActionBar';
+import type { EmailComposeContext } from './EmailComposeModal';
 import type { SmsVerifyModalContext } from './SmsVerifyModal';
+import { VersionsModal } from './VersionsModal';
 
 interface InvoicingBillingViewProps {
   clients: ClientRecord[];
   projects: ProjectRecord[];
   invoices: InvoiceRecord[];
+  invoiceSnapshots: DocumentVersionSnapshot[];
   onCreateInvoice: (invoice: InvoiceRecord) => void;
+  onUpdateInvoice: (invoice: InvoiceRecord) => void;
+  onSaveInvoiceSnapshot: (invoice: InvoiceRecord, note?: string) => void;
   onTriggerSmsVerify: (ctx: SmsVerifyModalContext) => void;
+  onOpenEmailCompose: (ctx: EmailComposeContext) => void;
 }
 
 export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
   clients,
   projects,
   invoices,
+  invoiceSnapshots,
   onCreateInvoice,
+  onUpdateInvoice,
+  onSaveInvoiceSnapshot,
   onTriggerSmsVerify,
+  onOpenEmailCompose,
 }) => {
   const [selectedId, setSelectedId] = useState(invoices[0]?.id || '');
   const [showNewModal, setShowNewModal] = useState(false);
+  const [showVersionsModal, setShowVersionsModal] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
 
   const [newProjectId, setNewProjectId] = useState(projects[0]?.id || '');
   const [billingPeriod, setBillingPeriod] = useState('Feb 2025');
@@ -151,7 +170,76 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
           </div>
         </div>
 
-        {active && (
+        {active && (() => {
+          const activeClient = clients.find((c) => c.id === active.clientId);
+          const activeProject = projects.find((p) => p.id === active.projectId);
+          const activeSnapshots = invoiceSnapshots.filter((s) => s.entityId === active.id);
+          const invoicePdfName = `${active.invoiceNumber}.pdf`;
+
+          const handleSaveInvoice = () => {
+            onUpdateInvoice({ ...active });
+            onSaveInvoiceSnapshot(active, `Saved Tax Invoice ${active.invoiceNumber} (${active.status})`);
+            setLastSavedAt(new Date().toISOString());
+          };
+
+          const handleDownloadInvoicePdf = () => {
+            downloadDocumentPdf({
+              filename: invoicePdfName,
+              headerBanner: 'FACILITY MANAGEMENT ERP · TAX INVOICE',
+              title: active.clientName,
+              subtitle: `Invoice ${active.invoiceNumber} · Billing Period ${active.billingPeriod}`,
+              metaPairs: [
+                ['Invoice No', active.invoiceNumber],
+                ['Issue Date', active.issueDate],
+                ['Due Date', active.dueDate],
+                ['Client GSTIN', active.gstin],
+                ['PO Number', active.poNumber],
+                ['Place of Supply', active.placeOfSupply],
+              ],
+              tableTitle: 'Contract-Linked Billing Particulars',
+              tableHeaders: ['Description', 'Contract Traceability', 'Amount'],
+              tableRows: [
+                ...active.lineItems.map((li) => [
+                  li.description,
+                  li.sourceRef,
+                  formatInrFull(li.amount),
+                ]),
+                ...(active.deductions > 0
+                  ? [['Applicable Deductions / SLA Credit', 'Contract SLA', `-${formatInrFull(active.deductions)}`]]
+                  : []),
+              ],
+              summaryRows: [
+                ['Taxable Value', formatInrFull(active.taxableValue)],
+                ...(active.placeOfSupply === 'Intra-State'
+                  ? [
+                      ['CGST (9%)', formatInrFull(active.cgst)] as [string, string],
+                      ['SGST (9%)', formatInrFull(active.sgst)] as [string, string],
+                    ]
+                  : [['IGST (18%)', formatInrFull(active.igst)] as [string, string]]),
+                ['Invoice Total', formatInrFull(active.totalAmount)],
+              ],
+              footerNote: `Project: ${activeProject?.code || active.projectId} · Status: ${active.status}`,
+            });
+          };
+
+          const handleOpenInvoiceEmail = () => {
+            onOpenEmailCompose({
+              projectId: active.projectId,
+              projectCode: activeProject?.code || active.projectId,
+              entityType: 'invoice',
+              entityId: active.id,
+              entityReference: active.invoiceNumber,
+              clientId: active.clientId,
+              clientName: active.clientName,
+              toEmail: activeClient?.email || '',
+              subject: `Tax Invoice ${active.invoiceNumber} (${active.billingPeriod}) — ${active.clientName}`,
+              body: `Dear ${activeClient?.contactPerson || 'Accounts Payable Team'},\n\nPlease find attached Tax Invoice ${active.invoiceNumber} for the billing period ${active.billingPeriod} against PO ${active.poNumber}.\n\nInvoice Summary:\n- Taxable Value: ${formatInrFull(active.taxableValue)}\n- Total GST (${active.placeOfSupply}): ${formatInrFull(active.cgst + active.sgst + active.igst)}\n- Invoice Total: ${formatInrFull(active.totalAmount)}\n- Due Date: ${active.dueDate}\n\nKindly process payment on or before the due date and share UTR details for reconciliation.\n\nRegards,\nFinance & Billing Desk\nFacility Management ERP`,
+              attachmentName: invoicePdfName,
+              onDownloadPdf: handleDownloadInvoicePdf,
+            });
+          };
+
+          return (
           <div className="lg:col-span-7 rounded-xl border border-slate-200 bg-white p-6 space-y-5">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-4">
               <div>
@@ -164,14 +252,22 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
                   GSTIN: {active.gstin} · PO: {active.poNumber} · {active.placeOfSupply}
                 </p>
               </div>
-              <div className="flex items-center gap-2 no-print">
+              <div className="flex flex-wrap items-center gap-2 no-print">
+                <DocumentActionBar
+                  onSave={handleSaveInvoice}
+                  onOpenVersions={() => setShowVersionsModal(true)}
+                  onOpenEmail={handleOpenInvoiceEmail}
+                  onDownloadPdf={handleDownloadInvoicePdf}
+                  versionCount={activeSnapshots.length || 1}
+                  lastSavedAt={lastSavedAt}
+                />
                 <button
                   type="button"
                   onClick={() => window.print()}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-[#14263D] hover:bg-slate-50"
                 >
                   <Printer className="h-3.5 w-3.5" />
-                  Print Tax Invoice
+                  Print
                 </button>
                 {!active.financeSmsVerified ? (
                   <button
@@ -257,8 +353,30 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
                 <span className="font-mono tabular-nums">{formatInrFull(active.totalAmount)}</span>
               </div>
             </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">Client PO Reference</label>
+                <input
+                  type="text"
+                  value={active.poNumber}
+                  onChange={(e) => onUpdateInvoice({ ...active, poNumber: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-mono text-[#14263D] focus:border-[#2463EB] focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">Payment Due Date</label>
+                <input
+                  type="date"
+                  value={active.dueDate}
+                  onChange={(e) => onUpdateInvoice({ ...active, dueDate: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-mono text-[#14263D] focus:border-[#2463EB] focus:outline-none"
+                />
+              </div>
+            </div>
           </div>
-        )}
+          );
+        })()}
       </div>
 
       {showNewModal && (
@@ -354,6 +472,21 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {active && (
+        <VersionsModal
+          isOpen={showVersionsModal}
+          onClose={() => setShowVersionsModal(false)}
+          title={`Invoice Revision History · ${active.invoiceNumber}`}
+          subtitle={`${active.clientName} · ${active.billingPeriod}`}
+          mode="snapshot"
+          snapshots={invoiceSnapshots.filter((s) => s.entityId === active.id)}
+          onCreateSnapshot={(note) => {
+            onSaveInvoiceSnapshot(active, note);
+            setLastSavedAt(new Date().toISOString());
+          }}
+        />
       )}
     </div>
   );

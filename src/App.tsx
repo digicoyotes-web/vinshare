@@ -9,6 +9,7 @@ import {
   FileSignature,
   FileText,
   Home,
+  Mail,
   Menu,
   MessageSquareText,
   Receipt,
@@ -25,9 +26,11 @@ import { AgreementsView } from './components/AgreementsView';
 import { AttritionRevisionsView } from './components/AttritionRevisionsView';
 import { ClientsLeadsView } from './components/ClientsLeadsView';
 import { DashboardView } from './components/DashboardView';
+import { EmailComposeModal, type EmailComposeContext } from './components/EmailComposeModal';
 import { InvoicingBillingView } from './components/InvoicingBillingView';
 import { LoiView } from './components/LoiView';
 import { PaymentsCollectionsView } from './components/PaymentsCollectionsView';
+import { ProjectEmailSectionView } from './components/ProjectEmailSectionView';
 import { ProjectsHandoverView } from './components/ProjectsHandoverView';
 import { ProposalsCostSheetView } from './components/ProposalsCostSheetView';
 import { ReportsAnalyticsView } from './components/ReportsAnalyticsView';
@@ -53,19 +56,67 @@ import type {
   AgreementRecord,
   AttritionRecord,
   ClientRecord,
+  DocumentVersionSnapshot,
   InvoiceRecord,
   LoiRecord,
   LoiStatus,
   NavModuleId,
   OpportunityRecord,
   PaymentRecord,
+  ProjectEmailRecord,
   ProjectRecord,
   ProposalRecord,
   ProposalVersion,
   SmsVerificationStats,
   UserAccount,
 } from './types/erp';
-import { calculateCostSheetFinancials } from './utils/formatters';
+import { calculateCostSheetFinancials, formatInrFull } from './utils/formatters';
+
+const EMAILS_STORAGE_KEY = 'fm_erp_project_emails_v1';
+const SNAPSHOTS_STORAGE_KEY = 'fm_erp_doc_snapshots_v1';
+
+const INITIAL_PROJECT_EMAILS: ProjectEmailRecord[] = [
+  {
+    id: 'EM-2025-001',
+    projectId: INITIAL_PROJECTS[0]?.id || 'PRJ-001',
+    projectCode: INITIAL_PROJECTS[0]?.code || 'PRJ-2025-01',
+    entityType: 'project',
+    entityId: INITIAL_PROJECTS[0]?.id || 'PRJ-001',
+    entityReference: INITIAL_PROJECTS[0]?.code || 'PRJ-2025-01',
+    clientId: INITIAL_PROJECTS[0]?.clientId || 'CLI-001',
+    clientName: INITIAL_PROJECTS[0]?.clientName || 'Urban Square Facilities Pvt Ltd',
+    direction: 'outbound',
+    fromEmail: 'operations@fmerp.in',
+    toEmail: 'v.mehta@urbansquare.in',
+    ccEmails: 'rohit.sharma@fmerp.in',
+    subject: `Mobilization & Handover Checklist Sign-Off · ${INITIAL_PROJECTS[0]?.code || 'PRJ-2025-01'}`,
+    body: 'Dear Vikram Mehta,\n\nAll 9 operational mobilization checkpoints for Urban Square IT Park Phase II are complete and verified. Please find the handover dossier attached.\n\nRegards,\nFacility Management Operations',
+    attachmentName: `${INITIAL_PROJECTS[0]?.code || 'PRJ-2025-01'}-Handover-Dossier.pdf`,
+    status: 'Delivered',
+    sentAt: '2025-01-20T09:30:00.000Z',
+    sentBy: 'Rohit Sharma',
+  },
+  {
+    id: 'EM-2025-002',
+    projectId: INITIAL_INVOICES[0]?.projectId || 'PRJ-001',
+    projectCode: INITIAL_PROJECTS[0]?.code || 'PRJ-2025-01',
+    entityType: 'invoice',
+    entityId: INITIAL_INVOICES[0]?.id || 'INV-01458',
+    entityReference: INITIAL_INVOICES[0]?.invoiceNumber || 'INV-01458',
+    clientId: INITIAL_INVOICES[0]?.clientId || 'CLI-001',
+    clientName: INITIAL_INVOICES[0]?.clientName || 'Urban Square Facilities Pvt Ltd',
+    direction: 'outbound',
+    fromEmail: 'finance@fmerp.in',
+    toEmail: 'v.mehta@urbansquare.in',
+    ccEmails: 'accounts@urbansquare.in',
+    subject: `Tax Invoice ${INITIAL_INVOICES[0]?.invoiceNumber || 'INV-01458'} — Urban Square Facilities Pvt Ltd`,
+    body: 'Dear Accounts Payable Team,\n\nPlease find attached the GST Tax Invoice for your monthly facility management services.\n\nRegards,\nFinance & Billing Desk',
+    attachmentName: `${INITIAL_INVOICES[0]?.invoiceNumber || 'INV-01458'}.pdf`,
+    status: 'Opened',
+    sentAt: '2025-01-24T11:15:00.000Z',
+    sentBy: 'Suresh Iyer',
+  },
+];
 
 const NAV_ITEMS: Array<{ id: NavModuleId; label: string; icon: React.FC<{ className?: string }> }> = [
   { id: 'dashboard', label: 'Dashboard', icon: Home },
@@ -77,6 +128,7 @@ const NAV_ITEMS: Array<{ id: NavModuleId; label: string; icon: React.FC<{ classN
   { id: 'projects', label: 'Projects & Handover', icon: Briefcase },
   { id: 'invoicing', label: 'Invoicing & Billing', icon: Receipt },
   { id: 'payments', label: 'Payments & Collections', icon: CreditCard },
+  { id: 'emails', label: 'Project Emails', icon: Mail },
   { id: 'sms', label: 'SMS Verification', icon: MessageSquareText },
   { id: 'reports', label: 'Reports & Analytics', icon: BarChart3 },
   { id: 'users', label: 'User Management', icon: UserCog },
@@ -114,10 +166,47 @@ export default function App() {
   const [smsDrawerOpen, setSmsDrawerOpen] = useState(false);
   const [smsDrawerPhoneFilter, setSmsDrawerPhoneFilter] = useState<string>('');
 
+  // Project Email & Document Version Snapshot State (persisted for Vercel + AI Studio)
+  const [projectEmails, setProjectEmails] = useState<ProjectEmailRecord[]>(() => {
+    try {
+      const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(EMAILS_STORAGE_KEY) : null;
+      if (saved) return JSON.parse(saved) as ProjectEmailRecord[];
+    } catch {
+      // Ignore storage parse error
+    }
+    return INITIAL_PROJECT_EMAILS;
+  });
+  const [docSnapshots, setDocSnapshots] = useState<DocumentVersionSnapshot[]>(() => {
+    try {
+      const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(SNAPSHOTS_STORAGE_KEY) : null;
+      if (saved) return JSON.parse(saved) as DocumentVersionSnapshot[];
+    } catch {
+      // Ignore storage parse error
+    }
+    return [];
+  });
+  const [emailComposeContext, setEmailComposeContext] = useState<EmailComposeContext | null>(null);
+
   // Topbar search & notifications
   const [globalQuery, setGlobalQuery] = useState('');
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(EMAILS_STORAGE_KEY, JSON.stringify(projectEmails));
+    } catch {
+      // Ignore quota errors
+    }
+  }, [projectEmails]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SNAPSHOTS_STORAGE_KEY, JSON.stringify(docSnapshots));
+    } catch {
+      // Ignore quota errors
+    }
+  }, [docSnapshots]);
 
   const activeUser = useMemo(
     () => users.find((u) => u.id === activeUserId) || users[0],
@@ -282,8 +371,148 @@ export default function App() {
     );
   };
 
+  const handleSelectProposalVersion = (proposalId: string, version: string) => {
+    setProposals((prev) =>
+      prev.map((p) => (p.id === proposalId ? { ...p, currentVersion: version } : p))
+    );
+  };
+
+  const handleCreateProposalSnapshot = (proposalId: string, note: string) => {
+    setProposals((prev) =>
+      prev.map((p) => {
+        if (p.id !== proposalId) return p;
+        const current =
+          p.versions.find((v) => v.version === p.currentVersion) ||
+          p.versions[p.versions.length - 1];
+        const nextVersionLabel = `V${p.versions.length + 1}`;
+        const cloned: ProposalVersion = {
+          ...current,
+          version: nextVersionLabel,
+          createdAt: new Date().toISOString(),
+          createdBy: activeUser.name,
+          reason: note,
+          status: 'Draft',
+          smsVerifiedApproval: false,
+        };
+        return {
+          ...p,
+          currentVersion: nextVersionLabel,
+          versions: [...p.versions, cloned],
+        };
+      })
+    );
+  };
+
   const handleCreateProposal = (proposal: ProposalRecord) => {
     setProposals((prev) => [proposal, ...prev]);
+  };
+
+  const handleUpdateInvoice = (updatedInvoice: InvoiceRecord) => {
+    setInvoices((prev) => prev.map((inv) => (inv.id === updatedInvoice.id ? updatedInvoice : inv)));
+  };
+
+  const handleSaveInvoiceSnapshot = (invoice: InvoiceRecord, note?: string) => {
+    const existingCount = docSnapshots.filter(
+      (s) => s.entityType === 'invoice' && s.entityId === invoice.id
+    ).length;
+    const snap: DocumentVersionSnapshot = {
+      id: `SNAP-INV-${Date.now().toString(36).toUpperCase()}`,
+      entityType: 'invoice',
+      entityId: invoice.id,
+      version: `Rev ${existingCount + 1}.0`,
+      savedAt: new Date().toISOString(),
+      savedBy: activeUser.name,
+      note: note || `PO ${invoice.poNumber} · Due ${invoice.dueDate}`,
+      summaryValue: formatInrFull(invoice.totalAmount),
+      statusLabel: invoice.status,
+    };
+    setDocSnapshots((prev) => [snap, ...prev]);
+  };
+
+  const handleSaveProjectSnapshot = (project: ProjectRecord, note?: string) => {
+    const existingCount = docSnapshots.filter(
+      (s) => s.entityType === 'project' && s.entityId === project.id
+    ).length;
+    const done = project.checklist.filter((c) => c.completed).length;
+    const snap: DocumentVersionSnapshot = {
+      id: `SNAP-PRJ-${Date.now().toString(36).toUpperCase()}`,
+      entityType: 'project',
+      entityId: project.id,
+      version: `Checkpoint v${existingCount + 1}.0`,
+      savedAt: new Date().toISOString(),
+      savedBy: activeUser.name,
+      note: note || `${done}/${project.checklist.length} handover checks completed`,
+      summaryValue: formatInrFull(project.annualValue),
+      statusLabel: project.closingStatus,
+    };
+    setDocSnapshots((prev) => [snap, ...prev]);
+  };
+
+  const handleSendProjectEmail = (ctx: EmailComposeContext & { attachPdf: boolean }) => {
+    const newRecord: ProjectEmailRecord = {
+      id: `EM-${Date.now().toString(36).toUpperCase()}`,
+      projectId: ctx.projectId,
+      projectCode: ctx.projectCode,
+      entityType: ctx.entityType,
+      entityId: ctx.entityId,
+      entityReference: ctx.entityReference,
+      clientId: ctx.clientId,
+      clientName: ctx.clientName,
+      direction: 'outbound',
+      fromEmail: activeUser.email,
+      toEmail: ctx.toEmail,
+      ccEmails: ctx.ccEmails || '',
+      subject: ctx.subject,
+      body: ctx.body,
+      attachmentName: ctx.attachPdf ? ctx.attachmentName : undefined,
+      status: 'Delivered',
+      sentAt: new Date().toISOString(),
+      sentBy: activeUser.name,
+    };
+    setProjectEmails((prev) => [newRecord, ...prev]);
+
+    if (ctx.entityType === 'proposal') {
+      setProposals((prev) =>
+        prev.map((p) =>
+          p.id === ctx.entityId
+            ? {
+                ...p,
+                versions: p.versions.map((v) =>
+                  v.version === p.currentVersion && v.status === 'Draft'
+                    ? { ...v, status: 'Shared with Client' }
+                    : v
+                ),
+              }
+            : p
+        )
+      );
+    }
+  };
+
+  const handleSimulateInboundEmail = (email: ProjectEmailRecord, replyBody: string) => {
+    const replyRecord: ProjectEmailRecord = {
+      id: `EM-IN-${Date.now().toString(36).toUpperCase()}`,
+      projectId: email.projectId,
+      projectCode: email.projectCode,
+      entityType: email.entityType,
+      entityId: email.entityId,
+      entityReference: email.entityReference,
+      clientId: email.clientId,
+      clientName: email.clientName,
+      direction: 'inbound',
+      fromEmail: email.direction === 'outbound' ? email.toEmail : email.fromEmail,
+      toEmail: activeUser.email,
+      ccEmails: '',
+      subject: email.subject.startsWith('Re:') ? email.subject : `Re: ${email.subject}`,
+      body: replyBody,
+      status: 'Replied',
+      sentAt: new Date().toISOString(),
+      sentBy: email.clientName,
+    };
+    setProjectEmails((prev) => [
+      replyRecord,
+      ...prev.map((item) => (item.id === email.id ? { ...item, status: 'Replied' as const } : item)),
+    ]);
   };
 
   const handleCreateRevision = (
@@ -707,8 +936,11 @@ export default function App() {
               clients={clients}
               proposals={proposals}
               onSaveProposalVersion={handleSaveProposalVersion}
+              onSelectProposalVersion={handleSelectProposalVersion}
+              onCreateProposalSnapshot={handleCreateProposalSnapshot}
               onCreateProposal={handleCreateProposal}
               onTriggerSmsVerify={setSmsVerifyContext}
+              onOpenEmailCompose={setEmailComposeContext}
               onGenerateLoiFromProposal={handleGenerateLoiFromProposal}
             />
           )}
@@ -756,9 +988,16 @@ export default function App() {
 
           {activeNav === 'projects' && (
             <ProjectsHandoverView
+              clients={clients}
               projects={projects}
+              projectSnapshots={docSnapshots.filter((s) => s.entityType === 'project')}
+              emails={projectEmails}
               onToggleChecklist={handleToggleChecklist}
+              onSaveProjectSnapshot={handleSaveProjectSnapshot}
               onTriggerSmsVerify={setSmsVerifyContext}
+              onOpenEmailCompose={setEmailComposeContext}
+              onSimulateInboundReply={handleSimulateInboundEmail}
+              onOpenFullEmailHub={() => setActiveNav('emails')}
               onGenerateInvoiceForProject={() => setActiveNav('invoicing')}
             />
           )}
@@ -768,8 +1007,12 @@ export default function App() {
               clients={clients}
               projects={projects}
               invoices={invoices}
+              invoiceSnapshots={docSnapshots.filter((s) => s.entityType === 'invoice')}
               onCreateInvoice={(inv) => setInvoices((prev) => [inv, ...prev])}
+              onUpdateInvoice={handleUpdateInvoice}
+              onSaveInvoiceSnapshot={handleSaveInvoiceSnapshot}
               onTriggerSmsVerify={setSmsVerifyContext}
+              onOpenEmailCompose={setEmailComposeContext}
             />
           )}
 
@@ -779,6 +1022,16 @@ export default function App() {
               payments={payments}
               onRecordPayment={handleRecordPayment}
               onTriggerSmsVerify={setSmsVerifyContext}
+            />
+          )}
+
+          {activeNav === 'emails' && (
+            <ProjectEmailSectionView
+              projects={projects}
+              clients={clients}
+              emails={projectEmails}
+              onOpenCompose={setEmailComposeContext}
+              onSimulateInboundReply={handleSimulateInboundEmail}
             />
           )}
 
@@ -839,6 +1092,16 @@ export default function App() {
             refreshSmsLedger();
           }
         }}
+      />
+
+      {/* Unified Email Composer Modal (Proposal, Invoice & Project) */}
+      <EmailComposeModal
+        context={emailComposeContext}
+        senderEmail={activeUser.email}
+        senderName={activeUser.name}
+        onClose={() => setEmailComposeContext(null)}
+        onSend={handleSendProjectEmail}
+        onOpenProjectEmailSection={() => setActiveNav('emails')}
       />
     </div>
   );

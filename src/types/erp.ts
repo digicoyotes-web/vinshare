@@ -8,6 +8,7 @@ export type NavModuleId =
   | 'projects'
   | 'invoicing'
   | 'payments'
+  | 'emails'
   | 'sms'
   | 'reports'
   | 'users'
@@ -355,3 +356,39 @@ export interface SmsAuditEventDto {
   detail: string;
   status: 'info' | 'success' | 'warning' | 'error';
 }
+
+export type EmailEntityType = 'proposal' | 'invoice' | 'project';
+
+export interface ProjectEmailRecord {
+  id: string;
+  projectId: string;
+  projectCode: string;
+  entityType: EmailEntityType;
+  entityId: string;
+  entityReference: string;
+  clientId: string;
+  clientName: string;
+  direction: 'outbound' | 'inbound';
+  fromEmail: string;
+  toEmail: string;
+  ccEmails: string;
+  subject: string;
+  body: string;
+  attachmentName?: string;
+  status: 'Sent' | 'Delivered' | 'Opened' | 'Replied';
+  sentAt: string;
+  sentBy: string;
+}
+
+export interface DocumentVersionSnapshot {
+  id: string;
+  entityType: 'invoice' | 'project';
+  entityId: string;
+  version: string;
+  savedAt: string;
+  savedBy: string;
+  note: string;
+  summaryValue: string;
+  statusLabel: string;
+}
+
