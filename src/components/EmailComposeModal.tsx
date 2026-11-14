@@ -1,18 +1,32 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
+  ArrowLeft,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Download,
   FileText,
   Folder,
   FolderOpen,
   HardDrive,
+  Loader2,
   Mail,
   Paperclip,
   Search,
   Send,
+  Server,
+  ShieldCheck,
   X,
 } from 'lucide-react';
+import {
+  fetchSmtpStatus,
+  saveAndVerifySmtpConfig,
+  sendEmailViaSmtp,
+  type SmtpAttachmentInput,
+  type SmtpStatusDto,
+} from '../services/smtpApi';
 import type { EmailEntityType, VirtualDocumentFile } from '../types/erp';
 import { formatFileBytes } from '../utils/virtualFileSystem';
 
@@ -30,6 +44,16 @@ export interface EmailComposeContext {
   body: string;
   attachmentName?: string;
   onDownloadPdf?: () => void;
+  buildAttachmentBlob?: () => Blob;
+}
+
+export interface DispatchedEmailPayload extends EmailComposeContext {
+  attachPdf: boolean;
+  attachmentNames: string[];
+  deliveryChannel: 'smtp' | 'erp_log';
+  smtpMessageId?: string;
+  smtpHost?: string;
+  fromEmailUsed?: string;
 }
 
 interface EmailComposeModalProps {
@@ -39,13 +63,20 @@ interface EmailComposeModalProps {
   senderName: string;
   onClose: () => void;
   onDownloadAttachment?: () => void;
-  onSend: (
-    payload: EmailComposeContext & { attachPdf: boolean; attachmentNames: string[] }
-  ) => void;
+  onSend: (payload: DispatchedEmailPayload) => void;
   onOpenProjectEmailSection?: () => void;
 }
 
 type FolderFilter = 'ALL' | 'Proposals' | 'Invoices' | 'Project-Reports';
+
+const EMAIL_ADDR_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function parseEmailList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
 export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   context,
@@ -66,32 +97,85 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const [activeFolder, setActiveFolder] = useState<FolderFilter>('ALL');
   const [clientOnlyFilter, setClientOnlyFilter] = useState(false);
   const [fsQuery, setFsQuery] = useState('');
-  const [sentDone, setSentDone] = useState(false);
+
+  // SMTP Status & Quick Configuration state
+  const [smtpStatus, setSmtpStatus] = useState<SmtpStatusDto | null>(null);
+  const [smtpLoading, setSmtpLoading] = useState(false);
+  const [smtpConfigOpen, setSmtpConfigOpen] = useState(false);
+  const [smtpHost, setSmtpHost] = useState('smtp.gmail.com');
+  const [smtpPort, setSmtpPort] = useState(587);
+  const [smtpSecure, setSmtpSecure] = useState(false);
+  const [smtpUser, setSmtpUser] = useState('');
+  const [smtpPass, setSmtpPass] = useState('');
+  const [smtpFromName, setSmtpFromName] = useState('Vinshar Facility Management ERP');
+  const [smtpFromEmail, setSmtpFromEmail] = useState('');
+  const [smtpSaving, setSmtpSaving] = useState(false);
+  const [smtpSaveNotice, setSmtpSaveNotice] = useState<string | null>(null);
+
+  const [confirmStep, setConfirmStep] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [sentResult, setSentResult] = useState<{
+    channel: 'smtp' | 'erp_log';
+    messageId?: string;
+    smtpHost?: string;
+    fromEmail: string;
+    toEmail: string;
+  } | null>(null);
 
   useEffect(() => {
-    if (context) {
-      setToEmail(context.toEmail);
-      setCcEmails(context.ccEmails || '');
-      setSubject(context.subject);
-      setBody(context.body);
-      setSentDone(false);
-      setFsOpen(false);
-      setFsQuery('');
-      setActiveFolder('ALL');
-      setClientOnlyFilter(false);
+    if (!context) return;
+    setToEmail(context.toEmail);
+    setCcEmails(context.ccEmails || '');
+    setSubject(context.subject);
+    setBody(context.body);
+    setSentResult(null);
+    setConfirmStep(false);
+    setIsSending(false);
+    setErrorMsg(null);
+    setSmtpSaveNotice(null);
+    setFsOpen(false);
+    setFsQuery('');
+    setActiveFolder('ALL');
+    setClientOnlyFilter(false);
 
-      // Auto-select matching file from virtual file system if present
-      if (context.attachmentName) {
-        const matched = vaultFiles.find((f) => f.filename === context.attachmentName);
-        if (matched) {
-          setSelectedFileIds([matched.id]);
-        } else {
-          setSelectedFileIds(['__CONTEXT_PRIMARY__']);
-        }
+    if (context.attachmentName) {
+      const matched = vaultFiles.find((f) => f.filename === context.attachmentName);
+      if (matched) {
+        setSelectedFileIds([matched.id]);
       } else {
-        setSelectedFileIds([]);
+        setSelectedFileIds(['__CONTEXT_PRIMARY__']);
       }
+    } else {
+      setSelectedFileIds([]);
     }
+
+    let cancelled = false;
+    setSmtpLoading(true);
+    fetchSmtpStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setSmtpStatus(status);
+        setSmtpHost(status.host || 'smtp.gmail.com');
+        setSmtpPort(status.port || 587);
+        setSmtpSecure(status.secure);
+        setSmtpUser(status.user || '');
+        setSmtpFromName(status.fromName || 'Vinshar Facility Management ERP');
+        setSmtpFromEmail(status.fromEmail || status.user || '');
+        setSmtpConfigOpen(!status.configured);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSmtpConfigOpen(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSmtpLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [context, vaultFiles]);
 
   const resolvedSelectedFiles = useMemo(() => {
@@ -102,6 +186,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       virtualPath: string;
       sizeLabel: string;
       onDownload?: () => void;
+      buildBlob?: () => Blob;
     }> = [];
 
     for (const id of selectedFileIds) {
@@ -112,6 +197,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
           virtualPath: `/ERP-Vault/Active/${context.attachmentName}`,
           sizeLabel: 'PDF',
           onDownload: context.onDownloadPdf || onDownloadAttachment,
+          buildBlob: context.buildAttachmentBlob,
         });
       } else {
         const vf = vaultFiles.find((f) => f.id === id);
@@ -122,6 +208,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
             virtualPath: vf.virtualPath,
             sizeLabel: formatFileBytes(vf.sizeBytes),
             onDownload: vf.buildPdf,
+            buildBlob: vf.buildPdfBlob,
           });
         }
       }
@@ -165,9 +252,147 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     );
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const applySmtpPreset = (preset: 'gmail' | 'office365' | 'zoho') => {
+    if (preset === 'gmail') {
+      setSmtpHost('smtp.gmail.com');
+      setSmtpPort(587);
+      setSmtpSecure(false);
+    } else if (preset === 'office365') {
+      setSmtpHost('smtp.office365.com');
+      setSmtpPort(587);
+      setSmtpSecure(false);
+    } else if (preset === 'zoho') {
+      setSmtpHost('smtp.zoho.in');
+      setSmtpPort(465);
+      setSmtpSecure(true);
+    }
+  };
+
+  const handleSaveVerifySmtp = async () => {
+    setErrorMsg(null);
+    setSmtpSaveNotice(null);
+    setSmtpSaving(true);
+    try {
+      const updated = await saveAndVerifySmtpConfig({
+        host: smtpHost.trim(),
+        port: Number(smtpPort) || 587,
+        secure: smtpSecure,
+        user: smtpUser.trim(),
+        pass: smtpPass || undefined,
+        fromName: smtpFromName.trim() || 'Vinshar Facility Management ERP',
+        fromEmail: (smtpFromEmail || smtpUser).trim(),
+        verify: true,
+      });
+      setSmtpStatus(updated);
+      setSmtpPass('');
+      setSmtpConfigOpen(false);
+      setSmtpSaveNotice(
+        `SMTP verified & connected (${updated.host}:${updated.port} as ${updated.fromEmail}).`
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'SMTP verification failed.');
+    } finally {
+      setSmtpSaving(false);
+    }
+  };
+
+  const validateFields = (): boolean => {
+    const toList = parseEmailList(toEmail);
+    if (toList.length === 0 || toList.some((addr) => !EMAIL_ADDR_RE.test(addr))) {
+      setErrorMsg('Please enter a valid recipient email address (e.g. digicoyotes@gmail.com).');
+      return false;
+    }
+    const ccList = parseEmailList(ccEmails);
+    if (ccList.some((addr) => !EMAIL_ADDR_RE.test(addr))) {
+      setErrorMsg('One or more CC email addresses look invalid.');
+      return false;
+    }
+    if (!subject.trim()) {
+      setErrorMsg('Please enter an email subject.');
+      return false;
+    }
+    if (!body.trim()) {
+      setErrorMsg('Please enter the message body.');
+      return false;
+    }
+    return true;
+  };
+
+  const handleReviewBeforeSend = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!toEmail.trim() || !subject.trim() || !body.trim()) return;
+    setErrorMsg(null);
+    if (!validateFields()) return;
+    if (!smtpStatus?.configured) {
+      setSmtpConfigOpen(true);
+      setErrorMsg(
+        'SMTP mail server is not configured yet. Enter your SMTP Host, Username, and Password / App Password above and click "Verify & Save SMTP".'
+      );
+      return;
+    }
+    setConfirmStep(true);
+  };
+
+  const handleConfirmSendSmtp = async () => {
+    setErrorMsg(null);
+    setIsSending(true);
+    try {
+      const attachments: SmtpAttachmentInput[] = [];
+      for (const file of resolvedSelectedFiles) {
+        if (file.buildBlob) {
+          attachments.push({
+            filename: file.filename,
+            blob: file.buildBlob(),
+            contentType: 'application/pdf',
+          });
+        }
+      }
+
+      const result = await sendEmailViaSmtp({
+        to: toEmail.trim(),
+        cc: ccEmails.trim() || undefined,
+        subject: subject.trim(),
+        body: body.trim(),
+        replyTo: senderEmail,
+        attachments,
+      });
+
+      const names = resolvedSelectedFiles.map((f) => f.filename);
+      onSend({
+        ...context,
+        toEmail: toEmail.trim(),
+        ccEmails: ccEmails.trim(),
+        subject: subject.trim(),
+        body: body.trim(),
+        attachmentName: names[0],
+        attachmentNames: names,
+        attachPdf: names.length > 0,
+        deliveryChannel: 'smtp',
+        smtpMessageId: result.messageId,
+        smtpHost: result.smtpHost,
+        fromEmailUsed: result.fromEmail,
+      });
+
+      setSentResult({
+        channel: 'smtp',
+        messageId: result.messageId,
+        smtpHost: result.smtpHost,
+        fromEmail: result.fromEmail,
+        toEmail: toEmail.trim(),
+      });
+      setConfirmStep(false);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'SMTP delivery failed. Check your SMTP configuration.'
+      );
+      setConfirmStep(false);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleSaveErpLogOnly = () => {
+    setErrorMsg(null);
+    if (!validateFields()) return;
     const names = resolvedSelectedFiles.map((f) => f.filename);
     onSend({
       ...context,
@@ -178,8 +403,14 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       attachmentName: names[0],
       attachmentNames: names,
       attachPdf: names.length > 0,
+      deliveryChannel: 'erp_log',
+      fromEmailUsed: senderEmail,
     });
-    setSentDone(true);
+    setSentResult({
+      channel: 'erp_log',
+      fromEmail: senderEmail,
+      toEmail: toEmail.trim(),
+    });
   };
 
   return (
@@ -195,7 +426,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                   ? 'Proposal'
                   : context.entityType === 'invoice'
                   ? 'Tax Invoice'
-                  : 'Project Communication'}
+                  : 'Project Communication'}{' '}
+                via SMTP
               </h2>
               <p className="text-[11px] text-slate-300">
                 {context.entityReference} · {context.clientName}
@@ -212,23 +444,48 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
           </button>
         </div>
 
-        {sentDone ? (
+        {sentResult ? (
           <div className="p-6 space-y-4">
-            <div className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-[#E8F5EE] p-4">
-              <CheckCircle2 className="h-5 w-5 text-emerald-700 shrink-0 mt-0.5" />
-              <div className="text-xs text-emerald-900">
-                <div className="font-semibold text-sm">Email Dispatched & Logged to Project Email Section</div>
+            <div
+              className={`flex items-start gap-3 rounded-lg border p-4 ${
+                sentResult.channel === 'smtp'
+                  ? 'border-emerald-200 bg-[#E8F5EE]'
+                  : 'border-amber-200 bg-amber-50'
+              }`}
+            >
+              <CheckCircle2
+                className={`h-5 w-5 shrink-0 mt-0.5 ${
+                  sentResult.channel === 'smtp' ? 'text-emerald-700' : 'text-amber-700'
+                }`}
+              />
+              <div
+                className={`text-xs ${
+                  sentResult.channel === 'smtp' ? 'text-emerald-900' : 'text-amber-900'
+                }`}
+              >
+                <div className="font-semibold text-sm">
+                  {sentResult.channel === 'smtp'
+                    ? 'Email Sent via SMTP & Saved to ERP Log'
+                    : 'Saved to Internal ERP Log Only (Not Sent via SMTP)'}
+                </div>
                 <p className="mt-1">
-                  Sent to <span className="font-mono font-semibold">{toEmail}</span> from{' '}
-                  <span className="font-mono">
-                    {senderName} &lt;{senderEmail}&gt;
-                  </span>
+                  {sentResult.channel === 'smtp' ? 'Delivered via SMTP to ' : 'Logged for '}
+                  <span className="font-mono font-semibold">{sentResult.toEmail}</span> from{' '}
+                  <span className="font-mono">{sentResult.fromEmail}</span>
                   {resolvedSelectedFiles.length > 0
-                    ? ` with ${resolvedSelectedFiles.length} attachment(s): ${resolvedSelectedFiles
+                    ? ` with ${resolvedSelectedFiles.length} PDF attachment(s): ${resolvedSelectedFiles
                         .map((f) => f.filename)
                         .join(', ')}`
                     : ''}
                   .
+                </p>
+                {sentResult.messageId && (
+                  <p className="mt-1 font-mono text-[11px] text-emerald-800">
+                    SMTP Server: {sentResult.smtpHost} · Message ID: {sentResult.messageId}
+                  </p>
+                )}
+                <p className="mt-1 text-[11px] opacity-90">
+                  Stored permanently in this record&apos;s Saved Snapshots & Email Log and in the Project Emails hub.
                 </p>
               </div>
             </div>
@@ -255,18 +512,336 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
               </button>
             </div>
           </div>
+        ) : confirmStep ? (
+          <div className="p-5 space-y-4 overflow-y-auto">
+            <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50/70 p-4">
+              <ShieldCheck className="h-5 w-5 text-[#2463EB] shrink-0 mt-0.5" />
+              <div className="text-xs text-[#14263D]">
+                <div className="font-bold text-sm">Confirm Live SMTP Email Dispatch</div>
+                <p className="mt-0.5 text-slate-600">
+                  This message will be transmitted over SMTP through{' '}
+                  <span className="font-mono font-semibold text-[#14263D]">
+                    {smtpStatus?.host}:{smtpStatus?.port}
+                  </span>{' '}
+                  to the recipient&apos;s mail server.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-[#F3F6FA]/60 p-4 space-y-2 text-xs">
+              <div className="grid grid-cols-[100px_1fr] gap-2">
+                <span className="font-semibold text-slate-500">SMTP Host</span>
+                <span className="font-mono text-[#14263D]">
+                  {smtpStatus?.host}:{smtpStatus?.port} ({smtpStatus?.secure ? 'SSL/TLS' : 'STARTTLS'})
+                </span>
+              </div>
+              <div className="grid grid-cols-[100px_1fr] gap-2">
+                <span className="font-semibold text-slate-500">From</span>
+                <span className="font-mono text-[#14263D]">
+                  {smtpStatus?.fromName} &lt;{smtpStatus?.fromEmail}&gt;
+                </span>
+              </div>
+              <div className="grid grid-cols-[100px_1fr] gap-2">
+                <span className="font-semibold text-slate-500">To</span>
+                <span className="font-mono font-semibold text-[#2463EB]">{toEmail.trim()}</span>
+              </div>
+              <div className="grid grid-cols-[100px_1fr] gap-2">
+                <span className="font-semibold text-slate-500">CC</span>
+                <span className="font-mono text-slate-700">{ccEmails.trim() || 'None'}</span>
+              </div>
+              <div className="grid grid-cols-[100px_1fr] gap-2">
+                <span className="font-semibold text-slate-500">Subject</span>
+                <span className="font-semibold text-[#14263D]">{subject.trim()}</span>
+              </div>
+              <div className="grid grid-cols-[100px_1fr] gap-2">
+                <span className="font-semibold text-slate-500">Attachments</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {resolvedSelectedFiles.length === 0 ? (
+                    <span className="text-slate-500">No attachments</span>
+                  ) : (
+                    resolvedSelectedFiles.map((file) => (
+                      <span
+                        key={file.id}
+                        className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-0.5 font-mono text-[11px] text-[#14263D]"
+                      >
+                        <Paperclip className="h-3 w-3 text-[#2463EB]" />
+                        {file.filename} ({file.sizeLabel})
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {errorMsg && (
+              <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={isSending}
+                onClick={() => setConfirmStep(false)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                Back to Edit
+              </button>
+              <button
+                type="button"
+                disabled={isSending}
+                onClick={handleConfirmSendSmtp}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+              >
+                {isSending ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Sending via SMTP...
+                  </>
+                ) : (
+                  <>
+                    <Send className="h-3.5 w-3.5" />
+                    Confirm & Send via SMTP
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         ) : (
-          <form onSubmit={handleSubmit} className="p-5 space-y-3.5 overflow-y-auto">
+          <form onSubmit={handleReviewBeforeSend} className="p-5 space-y-3.5 overflow-y-auto">
+            {/* Live SMTP Server Connection Status + Inline Setup */}
+            <div
+              className={`rounded-lg border px-3.5 py-2.5 space-y-2.5 ${
+                smtpStatus?.configured
+                  ? 'border-emerald-200 bg-[#E8F5EE]/70'
+                  : 'border-amber-200 bg-amber-50/70'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-[#14263D]">
+                    <Server
+                      className={`h-3.5 w-3.5 ${
+                        smtpStatus?.configured ? 'text-emerald-700' : 'text-amber-700'
+                      }`}
+                    />
+                    {smtpLoading
+                      ? 'Checking SMTP server configuration...'
+                      : smtpStatus?.configured
+                      ? `SMTP Ready · ${smtpStatus.host}:${smtpStatus.port} (${smtpStatus.fromEmail})`
+                      : 'SMTP Server Not Configured'}
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-0.5">
+                    {smtpStatus?.configured
+                      ? 'Emails and attached PDFs will be delivered via your configured SMTP relay.'
+                      : 'Configure your SMTP host, port, username, and password/app password to send real emails.'}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSmtpConfigOpen(!smtpConfigOpen)}
+                  className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#14263D] hover:bg-slate-50 shrink-0"
+                >
+                  {smtpConfigOpen ? (
+                    <>
+                      Hide SMTP Setup
+                      <ChevronUp className="h-3 w-3" />
+                    </>
+                  ) : (
+                    <>
+                      {smtpStatus?.configured ? 'Edit SMTP' : 'Configure SMTP'}
+                      <ChevronDown className="h-3 w-3" />
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {smtpSaveNotice && (
+                <div className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-800">
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                  <span>{smtpSaveNotice}</span>
+                </div>
+              )}
+
+              {smtpConfigOpen && (
+                <div className="rounded-lg border border-slate-200 bg-white p-3.5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold text-[#14263D]">
+                      SMTP Server Settings
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] text-slate-500">Presets:</span>
+                      <button
+                        type="button"
+                        onClick={() => applySmtpPreset('gmail')}
+                        className="rounded border border-slate-200 bg-[#F3F6FA] px-2 py-0.5 text-[10px] font-semibold text-[#14263D] hover:bg-slate-200"
+                      >
+                        Gmail (587)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applySmtpPreset('office365')}
+                        className="rounded border border-slate-200 bg-[#F3F6FA] px-2 py-0.5 text-[10px] font-semibold text-[#14263D] hover:bg-slate-200"
+                      >
+                        Outlook / 365 (587)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applySmtpPreset('zoho')}
+                        className="rounded border border-slate-200 bg-[#F3F6FA] px-2 py-0.5 text-[10px] font-semibold text-[#14263D] hover:bg-slate-200"
+                      >
+                        Zoho (465 SSL)
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                    <div className="sm:col-span-5">
+                      <label className="block text-[10px] font-medium text-slate-600 mb-1">
+                        SMTP Host
+                      </label>
+                      <input
+                        type="text"
+                        value={smtpHost}
+                        onChange={(e) => setSmtpHost(e.target.value)}
+                        placeholder="smtp.gmail.com"
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-3">
+                      <label className="block text-[10px] font-medium text-slate-600 mb-1">
+                        Port
+                      </label>
+                      <input
+                        type="number"
+                        value={smtpPort}
+                        onChange={(e) => {
+                          const p = Number(e.target.value) || 587;
+                          setSmtpPort(p);
+                          setSmtpSecure(p === 465);
+                        }}
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-4">
+                      <label className="block text-[10px] font-medium text-slate-600 mb-1">
+                        Security
+                      </label>
+                      <select
+                        value={smtpSecure ? 'ssl' : 'starttls'}
+                        onChange={(e) => setSmtpSecure(e.target.value === 'ssl')}
+                        className="w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs"
+                      >
+                        <option value="starttls">STARTTLS (Port 587)</option>
+                        <option value="ssl">SSL / TLS (Port 465)</option>
+                      </select>
+                    </div>
+
+                    <div className="sm:col-span-6">
+                      <label className="block text-[10px] font-medium text-slate-600 mb-1">
+                        SMTP Username / Email
+                      </label>
+                      <input
+                        type="text"
+                        value={smtpUser}
+                        onChange={(e) => {
+                          setSmtpUser(e.target.value);
+                          if (!smtpFromEmail || smtpFromEmail === smtpUser) {
+                            setSmtpFromEmail(e.target.value);
+                          }
+                        }}
+                        placeholder="your-email@gmail.com"
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-6">
+                      <label className="block text-[10px] font-medium text-slate-600 mb-1">
+                        SMTP Password / App Password
+                      </label>
+                      <input
+                        type="password"
+                        value={smtpPass}
+                        onChange={(e) => setSmtpPass(e.target.value)}
+                        placeholder={
+                          smtpStatus?.hasPassword ? '•••••••• (saved on server)' : '16-char App Password'
+                        }
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-6">
+                      <label className="block text-[10px] font-medium text-slate-600 mb-1">
+                        Sender Name
+                      </label>
+                      <input
+                        type="text"
+                        value={smtpFromName}
+                        onChange={(e) => setSmtpFromName(e.target.value)}
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs"
+                      />
+                    </div>
+                    <div className="sm:col-span-6">
+                      <label className="block text-[10px] font-medium text-slate-600 mb-1">
+                        From Email Address
+                      </label>
+                      <input
+                        type="email"
+                        value={smtpFromEmail}
+                        onChange={(e) => setSmtpFromEmail(e.target.value)}
+                        placeholder="your-email@gmail.com"
+                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                    <span className="text-[10px] text-slate-500">
+                      For Gmail SMTP, enable 2FA and use a 16-character Google App Password.
+                    </span>
+                    <button
+                      type="button"
+                      disabled={smtpSaving}
+                      onClick={handleSaveVerifySmtp}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-[#14263D] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+                    >
+                      {smtpSaving ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Verifying SMTP...
+                        </>
+                      ) : (
+                        <>
+                          <Check className="h-3 w-3" />
+                          Verify & Save SMTP
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {errorMsg && (
+              <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-[11px] font-medium text-slate-600 mb-1">
                   To (Recipient Email)
                 </label>
                 <input
-                  type="email"
+                  type="text"
                   required
                   value={toEmail}
                   onChange={(e) => setToEmail(e.target.value)}
+                  placeholder="client@company.com"
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-[#14263D] focus:border-[#2463EB] focus:outline-none"
                 />
               </div>
@@ -360,7 +935,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                 </div>
               )}
 
-              {/* Simulated Virtual File-System Explorer */}
+              {/* Virtual File-System Explorer */}
               {fsOpen && (
                 <div className="mt-2 rounded-lg border border-slate-200 bg-white overflow-hidden">
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
@@ -393,7 +968,6 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-12">
-                    {/* Directory Tree */}
                     <div className="md:col-span-4 border-b md:border-b-0 md:border-r border-slate-200 bg-[#F3F6FA]/50 p-2 space-y-1">
                       {(
                         [
@@ -435,7 +1009,6 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                       })}
                     </div>
 
-                    {/* File List */}
                     <div className="md:col-span-8 max-h-56 overflow-y-auto divide-y divide-slate-100">
                       {visibleVaultFiles.length === 0 ? (
                         <div className="p-5 text-center text-xs text-slate-500">
@@ -503,24 +1076,38 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
               )}
             </div>
 
-            <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
               <div className="text-[11px] text-slate-500">
-                From: <span className="font-medium text-slate-700">{senderName}</span> ({senderEmail})
+                From:{' '}
+                <span className="font-medium text-slate-700">
+                  {smtpStatus?.configured
+                    ? `${smtpStatus.fromName} <${smtpStatus.fromEmail}>`
+                    : `${senderName} (${senderEmail})`}
+                </span>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={onClose}
-                  className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  className="rounded-lg border border-slate-300 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
                 >
                   Cancel
                 </button>
+                {!smtpStatus?.configured && (
+                  <button
+                    type="button"
+                    onClick={handleSaveErpLogOnly}
+                    className="rounded-lg border border-slate-300 bg-slate-50 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    Log in ERP Only
+                  </button>
+                )}
                 <button
                   type="submit"
                   className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
                 >
                   <Send className="h-3.5 w-3.5" />
-                  Send Email
+                  Review & Send via SMTP
                 </button>
               </div>
             </div>

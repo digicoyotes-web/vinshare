@@ -157,7 +157,9 @@ export const EmbeddedProjectEmailPanel: React.FC<EmbeddedProjectEmailPanelProps>
                 <div className="mt-1 text-xs font-semibold text-[#14263D] truncate">{em.subject}</div>
                 <div className="mt-0.5 flex items-center justify-between text-[11px] text-slate-500">
                   <span className="truncate">{em.direction === 'outbound' ? `To: ${em.toEmail}` : `From: ${em.fromEmail}`}</span>
-                  <span className="font-medium text-emerald-700 shrink-0 ml-2">{em.status}</span>
+                  <span className="font-medium text-emerald-700 shrink-0 ml-2">
+                    {em.deliveryChannel === 'smtp' ? 'SMTP Sent' : em.status}
+                  </span>
                 </div>
               </button>
             ))}
@@ -170,7 +172,7 @@ export const EmbeddedProjectEmailPanel: React.FC<EmbeddedProjectEmailPanelProps>
                   <div className="flex items-start justify-between gap-2">
                     <h4 className="text-xs font-bold text-[#14263D]">{activeEmail.subject}</h4>
                     <span className="rounded bg-[#E8F5EE] px-2 py-0.5 text-[10px] font-semibold text-emerald-800 shrink-0">
-                      {activeEmail.status}
+                      {activeEmail.deliveryChannel === 'smtp' ? 'Sent via SMTP' : activeEmail.status}
                     </span>
                   </div>
                   <div className="mt-1 text-[11px] text-slate-500 space-y-0.5">
@@ -419,7 +421,9 @@ export const ProjectEmailSectionView: React.FC<ProjectEmailSectionViewProps> = (
                   <div className="mt-1 text-xs font-bold text-[#14263D] truncate">{em.subject}</div>
                   <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500">
                     <span className="truncate">{em.clientName} ({em.toEmail})</span>
-                    <span className="font-semibold text-emerald-700 shrink-0 ml-2">{em.status}</span>
+                    <span className="font-semibold text-emerald-700 shrink-0 ml-2">
+                      {em.deliveryChannel === 'smtp' ? 'SMTP Sent' : em.status}
+                    </span>
                   </div>
                 </button>
               ))}
@@ -444,10 +448,15 @@ export const ProjectEmailSectionView: React.FC<ProjectEmailSectionViewProps> = (
                       <span className="font-medium text-slate-800">To:</span> {activeEmail.toEmail}
                       {activeEmail.ccEmails ? ` · CC: ${activeEmail.ccEmails}` : ''}
                     </div>
+                    {activeEmail.smtpMessageId && (
+                      <div className="font-mono text-[11px] text-emerald-700">
+                        SMTP{activeEmail.smtpHost ? ` (${activeEmail.smtpHost})` : ''} Message ID: {activeEmail.smtpMessageId}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <span className="rounded bg-[#E8F5EE] px-2.5 py-1 text-xs font-semibold text-emerald-800">
-                  {activeEmail.status}
+                  {activeEmail.deliveryChannel === 'smtp' ? 'Sent via SMTP' : activeEmail.status}
                 </span>
               </div>
 

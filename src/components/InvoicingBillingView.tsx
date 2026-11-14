@@ -4,12 +4,14 @@ import type {
   ClientRecord,
   DocumentVersionSnapshot,
   InvoiceRecord,
+  ProjectEmailRecord,
   ProjectRecord,
 } from '../types/erp';
 import { loadMasterSettings } from '../utils/erpSettings';
 import { formatInrFull } from '../utils/formatters';
-import { downloadDocumentPdf } from '../utils/pdfGenerator';
+import { buildPdfBlob, downloadDocumentPdf, type PdfDocumentSpec } from '../utils/pdfGenerator';
 import { DocumentActionBar } from './DocumentActionBar';
+import { DocumentActivityTrail } from './DocumentActivityTrail';
 import type { EmailComposeContext } from './EmailComposeModal';
 import type { SmsVerifyModalContext } from './SmsVerifyModal';
 import { VersionsModal } from './VersionsModal';
@@ -19,11 +21,13 @@ interface InvoicingBillingViewProps {
   projects: ProjectRecord[];
   invoices: InvoiceRecord[];
   invoiceSnapshots: DocumentVersionSnapshot[];
+  emails: ProjectEmailRecord[];
   onCreateInvoice: (invoice: InvoiceRecord) => void;
   onUpdateInvoice: (invoice: InvoiceRecord) => void;
   onSaveInvoiceSnapshot: (invoice: InvoiceRecord, note?: string) => void;
   onTriggerSmsVerify: (ctx: SmsVerifyModalContext) => void;
   onOpenEmailCompose: (ctx: EmailComposeContext) => void;
+  onOpenEmailHub: () => void;
 }
 
 export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
@@ -31,16 +35,18 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
   projects,
   invoices,
   invoiceSnapshots,
+  emails,
   onCreateInvoice,
   onUpdateInvoice,
   onSaveInvoiceSnapshot,
   onTriggerSmsVerify,
   onOpenEmailCompose,
+  onOpenEmailHub,
 }) => {
   const [selectedId, setSelectedId] = useState(invoices[0]?.id || '');
   const [showNewModal, setShowNewModal] = useState(false);
   const [showVersionsModal, setShowVersionsModal] = useState(false);
-  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [savedAtById, setSavedAtById] = useState<Record<string, string>>({});
 
   const [newProjectId, setNewProjectId] = useState(projects[0]?.id || '');
   const [billingPeriod, setBillingPeriod] = useState(() =>
@@ -189,6 +195,12 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
           const activeClient = clients.find((c) => c.id === active.clientId);
           const activeProject = projects.find((p) => p.id === active.projectId);
           const activeSnapshots = invoiceSnapshots.filter((s) => s.entityId === active.id);
+          const activeEmails = emails.filter(
+            (em) =>
+              (em.entityType === 'invoice' && em.entityId === active.id) ||
+              em.entityReference === active.invoiceNumber
+          );
+          const activeSavedAt = savedAtById[active.id] || activeSnapshots[0]?.savedAt || null;
           const invoicePdfName = `${active.invoiceNumber}.pdf`;
           const effectiveIgstRate =
             active.taxableValue > 0
@@ -199,47 +211,49 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
           const handleSaveInvoice = () => {
             onUpdateInvoice({ ...active });
             onSaveInvoiceSnapshot(active, `Saved Tax Invoice ${active.invoiceNumber} (${active.status})`);
-            setLastSavedAt(new Date().toISOString());
+            setSavedAtById((prev) => ({ ...prev, [active.id]: new Date().toISOString() }));
           };
 
+          const buildInvoicePdfSpec = (): PdfDocumentSpec => ({
+            filename: invoicePdfName,
+            headerBanner: 'FACILITY MANAGEMENT ERP · TAX INVOICE',
+            title: active.clientName,
+            subtitle: `Invoice ${active.invoiceNumber} · Billing Period ${active.billingPeriod}`,
+            metaPairs: [
+              ['Invoice No', active.invoiceNumber],
+              ['Issue Date', active.issueDate],
+              ['Due Date', active.dueDate],
+              ['Client GSTIN', active.gstin],
+              ['PO Number', active.poNumber],
+              ['Place of Supply', active.placeOfSupply],
+            ],
+            tableTitle: 'Contract-Linked Billing Particulars',
+            tableHeaders: ['Description', 'Contract Traceability', 'Amount'],
+            tableRows: [
+              ...active.lineItems.map((li) => [
+                li.description,
+                li.sourceRef,
+                formatInrFull(li.amount),
+              ]),
+              ...(active.deductions > 0
+                ? [['Applicable Deductions / SLA Credit', 'Contract SLA', `-${formatInrFull(active.deductions)}`]]
+                : []),
+            ],
+            summaryRows: [
+              ['Taxable Value', formatInrFull(active.taxableValue)],
+              ...(active.placeOfSupply === 'Intra-State'
+                ? [
+                    [`CGST (${halfGstLabel}%)`, formatInrFull(active.cgst)] as [string, string],
+                    [`SGST (${halfGstLabel}%)`, formatInrFull(active.sgst)] as [string, string],
+                  ]
+                : [[`IGST (${effectiveIgstRate}%)`, formatInrFull(active.igst)] as [string, string]]),
+              ['Invoice Total', formatInrFull(active.totalAmount)],
+            ],
+            footerNote: `Project: ${activeProject?.code || active.projectId} · Status: ${active.status}`,
+          });
+
           const handleDownloadInvoicePdf = () => {
-            downloadDocumentPdf({
-              filename: invoicePdfName,
-              headerBanner: 'FACILITY MANAGEMENT ERP · TAX INVOICE',
-              title: active.clientName,
-              subtitle: `Invoice ${active.invoiceNumber} · Billing Period ${active.billingPeriod}`,
-              metaPairs: [
-                ['Invoice No', active.invoiceNumber],
-                ['Issue Date', active.issueDate],
-                ['Due Date', active.dueDate],
-                ['Client GSTIN', active.gstin],
-                ['PO Number', active.poNumber],
-                ['Place of Supply', active.placeOfSupply],
-              ],
-              tableTitle: 'Contract-Linked Billing Particulars',
-              tableHeaders: ['Description', 'Contract Traceability', 'Amount'],
-              tableRows: [
-                ...active.lineItems.map((li) => [
-                  li.description,
-                  li.sourceRef,
-                  formatInrFull(li.amount),
-                ]),
-                ...(active.deductions > 0
-                  ? [['Applicable Deductions / SLA Credit', 'Contract SLA', `-${formatInrFull(active.deductions)}`]]
-                  : []),
-              ],
-              summaryRows: [
-                ['Taxable Value', formatInrFull(active.taxableValue)],
-                ...(active.placeOfSupply === 'Intra-State'
-                  ? [
-                      [`CGST (${halfGstLabel}%)`, formatInrFull(active.cgst)] as [string, string],
-                      [`SGST (${halfGstLabel}%)`, formatInrFull(active.sgst)] as [string, string],
-                    ]
-                  : [[`IGST (${effectiveIgstRate}%)`, formatInrFull(active.igst)] as [string, string]]),
-                ['Invoice Total', formatInrFull(active.totalAmount)],
-              ],
-              footerNote: `Project: ${activeProject?.code || active.projectId} · Status: ${active.status}`,
-            });
+            downloadDocumentPdf(buildInvoicePdfSpec());
           };
 
           const handleOpenInvoiceEmail = () => {
@@ -256,6 +270,7 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
               body: `Dear ${activeClient?.contactPerson || 'Accounts Payable Team'},\n\nPlease find attached Tax Invoice ${active.invoiceNumber} for the billing period ${active.billingPeriod} against PO ${active.poNumber}.\n\nInvoice Summary:\n- Taxable Value: ${formatInrFull(active.taxableValue)}\n- Total GST (${active.placeOfSupply}): ${formatInrFull(active.cgst + active.sgst + active.igst)}\n- Invoice Total: ${formatInrFull(active.totalAmount)}\n- Due Date: ${active.dueDate}\n\nKindly process payment on or before the due date and share UTR details for reconciliation.\n\nRegards,\nFinance & Billing Desk\nFacility Management ERP`,
               attachmentName: invoicePdfName,
               onDownloadPdf: handleDownloadInvoicePdf,
+              buildAttachmentBlob: () => buildPdfBlob(buildInvoicePdfSpec()),
             });
           };
 
@@ -278,8 +293,8 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
                   onOpenVersions={() => setShowVersionsModal(true)}
                   onOpenEmail={handleOpenInvoiceEmail}
                   onDownloadPdf={handleDownloadInvoicePdf}
-                  versionCount={activeSnapshots.length || 1}
-                  lastSavedAt={lastSavedAt}
+                  versionCount={activeSnapshots.length}
+                  lastSavedAt={activeSavedAt}
                 />
                 <button
                   type="button"
@@ -394,6 +409,15 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
                 />
               </div>
             </div>
+
+            <DocumentActivityTrail
+              entityLabel={active.invoiceNumber}
+              snapshots={activeSnapshots}
+              emails={activeEmails}
+              onOpenVersions={() => setShowVersionsModal(true)}
+              onOpenEmail={handleOpenInvoiceEmail}
+              onOpenEmailHub={onOpenEmailHub}
+            />
           </div>
           );
         })()}
@@ -515,7 +539,7 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
           snapshots={invoiceSnapshots.filter((s) => s.entityId === active.id)}
           onCreateSnapshot={(note) => {
             onSaveInvoiceSnapshot(active, note);
-            setLastSavedAt(new Date().toISOString());
+            setSavedAtById((prev) => ({ ...prev, [active.id]: new Date().toISOString() }));
           }}
         />
       )}

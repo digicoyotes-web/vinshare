@@ -70,6 +70,7 @@ export function buildVirtualDocumentVault(params: {
         savedBy: ver.createdBy,
         sizeBytes: buildPdfBlob(spec).size,
         buildPdf: () => downloadDocumentPdf(spec),
+        buildPdfBlob: () => buildPdfBlob(spec),
       });
     }
   }
@@ -133,6 +134,7 @@ export function buildVirtualDocumentVault(params: {
       savedBy: 'Finance Desk',
       sizeBytes: buildPdfBlob(liveSpec).size,
       buildPdf: () => downloadDocumentPdf(liveSpec),
+      buildPdfBlob: () => buildPdfBlob(liveSpec),
     });
 
     for (const snap of invSnapshots) {
@@ -154,6 +156,7 @@ export function buildVirtualDocumentVault(params: {
         savedBy: snap.savedBy,
         sizeBytes: buildPdfBlob(snapSpec).size,
         buildPdf: () => downloadDocumentPdf(snapSpec),
+        buildPdfBlob: () => buildPdfBlob(snapSpec),
       });
     }
   }
@@ -212,6 +215,7 @@ export function buildVirtualDocumentVault(params: {
       savedBy: prj.opsManager,
       sizeBytes: buildPdfBlob(livePrjSpec).size,
       buildPdf: () => downloadDocumentPdf(livePrjSpec),
+      buildPdfBlob: () => buildPdfBlob(livePrjSpec),
     });
 
     for (const snap of prjSnapshots) {
@@ -233,6 +237,7 @@ export function buildVirtualDocumentVault(params: {
         savedBy: snap.savedBy,
         sizeBytes: buildPdfBlob(snapPrjSpec).size,
         buildPdf: () => downloadDocumentPdf(snapPrjSpec),
+        buildPdfBlob: () => buildPdfBlob(snapPrjSpec),
       });
     }
   }

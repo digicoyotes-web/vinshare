@@ -25,7 +25,11 @@ import { AgreementsView } from './components/AgreementsView';
 import { AttritionRevisionsView } from './components/AttritionRevisionsView';
 import { ClientsLeadsView } from './components/ClientsLeadsView';
 import { DashboardView } from './components/DashboardView';
-import { EmailComposeModal, type EmailComposeContext } from './components/EmailComposeModal';
+import {
+  EmailComposeModal,
+  type DispatchedEmailPayload,
+  type EmailComposeContext,
+} from './components/EmailComposeModal';
 import { InvoicingBillingView } from './components/InvoicingBillingView';
 import { LoiView } from './components/LoiView';
 import { PaymentsCollectionsView } from './components/PaymentsCollectionsView';
@@ -573,6 +577,31 @@ export default function App() {
     void upsertErpRecord('invoices', updatedInvoice);
   };
 
+  const handleSaveProposalSnapshot = (
+    proposal: ProposalRecord,
+    version: ProposalVersion,
+    note?: string
+  ) => {
+    const existingCount = docSnapshots.filter(
+      (s) => s.entityType === 'proposal' && s.entityId === proposal.id
+    ).length;
+    const snap: DocumentVersionSnapshot = {
+      id: `SNAP-PROP-${Date.now().toString(36).toUpperCase()}`,
+      entityType: 'proposal',
+      entityId: proposal.id,
+      version: `${version.version} (Save #${existingCount + 1})`,
+      savedAt: new Date().toISOString(),
+      savedBy: activeUser.name,
+      note:
+        note ||
+        `${proposal.reference} · ${version.lineItems.length} line items · Margin ${version.grossMarginPct}%`,
+      summaryValue: formatInrFull(version.annualContractValue),
+      statusLabel: version.status,
+    };
+    setDocSnapshots((prev) => [snap, ...prev]);
+    void upsertErpRecord('doc_snapshots', snap);
+  };
+
   const handleSaveInvoiceSnapshot = (invoice: InvoiceRecord, note?: string) => {
     const existingCount = docSnapshots.filter(
       (s) => s.entityType === 'invoice' && s.entityId === invoice.id
@@ -612,9 +641,7 @@ export default function App() {
     void upsertErpRecord('doc_snapshots', snap);
   };
 
-  const handleSendProjectEmail = (
-    ctx: EmailComposeContext & { attachPdf: boolean; attachmentNames: string[] }
-  ) => {
+  const handleSendProjectEmail = (ctx: DispatchedEmailPayload) => {
     const newRecord: ProjectEmailRecord = {
       id: `EM-${Date.now().toString(36).toUpperCase()}`,
       projectId: ctx.projectId,
@@ -625,14 +652,17 @@ export default function App() {
       clientId: ctx.clientId,
       clientName: ctx.clientName,
       direction: 'outbound',
-      fromEmail: activeUser.email,
+      fromEmail: ctx.fromEmailUsed || activeUser.email,
       toEmail: ctx.toEmail,
       ccEmails: ctx.ccEmails || '',
       subject: ctx.subject,
       body: ctx.body,
       attachmentName: ctx.attachPdf ? ctx.attachmentNames[0] || ctx.attachmentName : undefined,
       attachmentNames: ctx.attachPdf ? ctx.attachmentNames : [],
-      status: 'Delivered',
+      status: ctx.deliveryChannel === 'smtp' ? 'Sent' : 'Delivered',
+      deliveryChannel: ctx.deliveryChannel,
+      smtpMessageId: ctx.smtpMessageId,
+      smtpHost: ctx.smtpHost,
       sentAt: new Date().toISOString(),
       sentBy: activeUser.name,
     };
@@ -1137,14 +1167,18 @@ export default function App() {
               clients={clients}
               opportunities={opportunities}
               proposals={proposals}
+              proposalSnapshots={docSnapshots.filter((s) => s.entityType === 'proposal')}
+              emails={projectEmails}
               focusClientId={focusClientId}
               onClearFocusClient={() => setFocusClientId(undefined)}
               onSaveProposalVersion={handleSaveProposalVersion}
               onSelectProposalVersion={handleSelectProposalVersion}
               onCreateProposalSnapshot={handleCreateProposalSnapshot}
+              onSaveProposalDocSnapshot={handleSaveProposalSnapshot}
               onCreateProposal={handleCreateProposal}
               onTriggerSmsVerify={setSmsVerifyContext}
               onOpenEmailCompose={setEmailComposeContext}
+              onOpenEmailHub={() => setActiveNav('emails')}
               onGenerateLoiFromProposal={handleGenerateLoiFromProposal}
             />
           )}
@@ -1224,6 +1258,7 @@ export default function App() {
               projects={projects}
               invoices={invoices}
               invoiceSnapshots={docSnapshots.filter((s) => s.entityType === 'invoice')}
+              emails={projectEmails}
               onCreateInvoice={(inv) => {
                 setInvoices((prev) => [inv, ...prev]);
                 void upsertErpRecord('invoices', inv);
@@ -1232,6 +1267,7 @@ export default function App() {
               onSaveInvoiceSnapshot={handleSaveInvoiceSnapshot}
               onTriggerSmsVerify={setSmsVerifyContext}
               onOpenEmailCompose={setEmailComposeContext}
+              onOpenEmailHub={() => setActiveNav('emails')}
             />
           )}
 

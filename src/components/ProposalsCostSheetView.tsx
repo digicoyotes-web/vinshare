@@ -19,15 +19,18 @@ import {
 import type {
   ClientRecord,
   CostSheetLineItem,
+  DocumentVersionSnapshot,
   IndustryCategory,
   OpportunityRecord,
+  ProjectEmailRecord,
   ProposalRecord,
   ProposalVersion,
 } from '../types/erp';
 import { loadMasterSettings } from '../utils/erpSettings';
 import { calculateCostSheetFinancials, downloadCsv, formatInrFull } from '../utils/formatters';
-import { downloadDocumentPdf } from '../utils/pdfGenerator';
+import { buildPdfBlob, downloadDocumentPdf, type PdfDocumentSpec } from '../utils/pdfGenerator';
 import { DocumentActionBar } from './DocumentActionBar';
+import { DocumentActivityTrail } from './DocumentActivityTrail';
 import type { EmailComposeContext } from './EmailComposeModal';
 import type { SmsVerifyModalContext } from './SmsVerifyModal';
 import { VersionsModal } from './VersionsModal';
@@ -36,14 +39,18 @@ interface ProposalsCostSheetViewProps {
   clients: ClientRecord[];
   opportunities: OpportunityRecord[];
   proposals: ProposalRecord[];
+  proposalSnapshots: DocumentVersionSnapshot[];
+  emails: ProjectEmailRecord[];
   focusClientId?: string;
   onClearFocusClient?: () => void;
   onSaveProposalVersion: (proposalId: string, updated: ProposalVersion) => void;
   onSelectProposalVersion: (proposalId: string, version: string) => void;
   onCreateProposalSnapshot: (proposalId: string, note: string) => void;
+  onSaveProposalDocSnapshot: (proposal: ProposalRecord, version: ProposalVersion, note?: string) => void;
   onCreateProposal: (proposal: ProposalRecord) => void;
   onTriggerSmsVerify: (ctx: SmsVerifyModalContext) => void;
   onOpenEmailCompose: (ctx: EmailComposeContext) => void;
+  onOpenEmailHub: () => void;
   onGenerateLoiFromProposal: (proposalId: string) => void;
 }
 
@@ -51,14 +58,18 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
   clients,
   opportunities,
   proposals,
+  proposalSnapshots,
+  emails,
   focusClientId,
   onClearFocusClient,
   onSaveProposalVersion,
   onSelectProposalVersion,
   onCreateProposalSnapshot,
+  onSaveProposalDocSnapshot,
   onCreateProposal,
   onTriggerSmsVerify,
   onOpenEmailCompose,
+  onOpenEmailHub,
   onGenerateLoiFromProposal,
 }) => {
   const settings = loadMasterSettings();
@@ -66,7 +77,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
   const [showPreview, setShowPreview] = useState(false);
   const [showNewWizard, setShowNewWizard] = useState(false);
   const [showVersionsModal, setShowVersionsModal] = useState(false);
-  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [savedAtById, setSavedAtById] = useState<Record<string, string>>({});
   const [focusedClientNotice, setFocusedClientNotice] = useState<ClientRecord | null>(null);
 
   // New proposal wizard state
@@ -320,16 +331,34 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
   }
 
   const activeClient = clients.find((c) => c.id === activeProposal.clientId);
+  const activeProposalSnapshots = proposalSnapshots.filter(
+    (s) => s.entityId === activeProposal.id
+  );
+  const activeProposalEmails = emails.filter(
+    (em) =>
+      (em.entityType === 'proposal' && em.entityId === activeProposal.id) ||
+      em.entityReference.startsWith(activeProposal.reference)
+  );
+  const activeSavedAt =
+    savedAtById[activeProposal.id] || activeProposalSnapshots[0]?.savedAt || null;
   const proposalPdfName = `${activeProposal.reference.replace(/\//g, '-')}-${activeVersion.version}.pdf`;
 
   const handleSaveProposal = () => {
     onSaveProposalVersion(activeProposal.id, { ...activeVersion });
-    setLastSavedAt(new Date().toISOString());
+    onSaveProposalDocSnapshot(
+      activeProposal,
+      activeVersion,
+      `Saved ${activeProposal.reference} (${activeVersion.version}) · ${formatInrFull(activeVersion.monthlySellingPrice)}/mo`
+    );
+    setSavedAtById((prev) => ({
+      ...prev,
+      [activeProposal.id]: new Date().toISOString(),
+    }));
   };
 
-  const handleDownloadProposalPdf = () => {
+  const buildActiveProposalPdfSpec = (): PdfDocumentSpec => {
     const mgmtFeeAmount = Math.max(0, activeVersion.monthlySellingPrice - activeVersion.totalOperatingCost);
-    downloadDocumentPdf({
+    return {
       filename: proposalPdfName,
       headerBanner: `${COMPANY_PROFILE.shortName.toUpperCase()} · COMMERCIAL PROPOSAL`,
       title: `${activeClient?.companyName || activeProposal.clientId}`,
@@ -361,7 +390,11 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
         ['Annual Contract Value', formatInrFull(activeVersion.annualContractValue)],
       ],
       footerNote: `${COMPANY_PROFILE.legalName} · ${COMPANY_PROFILE.corporateOffice}`,
-    });
+    };
+  };
+
+  const handleDownloadProposalPdf = () => {
+    downloadDocumentPdf(buildActiveProposalPdfSpec());
   };
 
   const handleOpenProposalEmail = () => {
@@ -378,6 +411,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
       body: `Dear ${activeClient?.contactPerson || 'Sir / Madam'},\n\nPlease find attached our Commercial Facility Management Proposal ${activeProposal.reference} (${activeVersion.version}) for ${activeProposal.siteName}.\n\nKey Commercial Summary:\n- Services Included: ${activeProposal.selectedServices.join(', ')}\n- Contract Duration: ${activeProposal.contractDurationMonths} Months\n- Monthly Commercials: ${formatInrFull(activeVersion.monthlySellingPrice)} (excl. GST)\n- Annual Contract Value: ${formatInrFull(activeVersion.annualContractValue)}\n- Proposal Validity: ${activeProposal.validityDate}\n\nKindly review and let us know if you would like any scope adjustments or proceed to LOI issuance.\n\nWarm regards,\nCommercial & Estimation Desk\nFacility Management ERP`,
       attachmentName: proposalPdfName,
       onDownloadPdf: handleDownloadProposalPdf,
+      buildAttachmentBlob: () => buildPdfBlob(buildActiveProposalPdfSpec()),
     });
   };
 
@@ -488,7 +522,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
             onOpenEmail={handleOpenProposalEmail}
             onDownloadPdf={handleDownloadProposalPdf}
             versionCount={activeProposal.versions.length}
-            lastSavedAt={lastSavedAt}
+            lastSavedAt={activeSavedAt}
           />
           {activeVersion.status !== 'Approved' ? (
             <button
@@ -938,6 +972,15 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
           </div>
         </div>
       )}
+
+      <DocumentActivityTrail
+        entityLabel={`${activeProposal.reference} (${activeVersion.version})`}
+        snapshots={activeProposalSnapshots}
+        emails={activeProposalEmails}
+        onOpenVersions={() => setShowVersionsModal(true)}
+        onOpenEmail={handleOpenProposalEmail}
+        onOpenEmailHub={onOpenEmailHub}
+      />
 
       {/* New Proposal Wizard Modal */}
       {showNewWizard && (

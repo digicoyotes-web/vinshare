@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import express from 'express';
+import nodemailer from 'nodemailer';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
@@ -311,10 +313,187 @@ function expireStaleChallenges() {
   }
 }
 
+interface SmtpRuntimeConfig {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  pass: string;
+  fromName: string;
+  fromEmail: string;
+  source: 'env' | 'runtime';
+}
+
+function getEnvSmtpDefaults(): SmtpRuntimeConfig {
+  const port = Number(process.env.SMTP_PORT) || 587;
+  const secureEnv = (process.env.SMTP_SECURE || '').toLowerCase();
+  const secure = secureEnv ? secureEnv === 'true' || secureEnv === '1' : port === 465;
+  const user = (process.env.SMTP_USER || '').trim();
+  return {
+    host: (process.env.SMTP_HOST || '').trim(),
+    port,
+    secure,
+    user,
+    pass: process.env.SMTP_PASS || '',
+    fromName: (process.env.SMTP_FROM_NAME || 'Vinshar Facility Management ERP').trim(),
+    fromEmail: (process.env.SMTP_FROM_EMAIL || user).trim(),
+    source: 'env',
+  };
+}
+
+let runtimeSmtpConfig: SmtpRuntimeConfig = getEnvSmtpDefaults();
+
+interface SmtpActivityRecord {
+  id: string;
+  to: string;
+  cc?: string;
+  from: string;
+  subject: string;
+  status: 'Sent' | 'Failed';
+  messageId?: string;
+  smtpHost?: string;
+  response?: string;
+  errorMessage?: string;
+  attachmentCount: number;
+  timestamp: string;
+}
+
+const smtpActivityLog: SmtpActivityRecord[] = [];
+
+function pushSmtpActivityLog(entry: Omit<SmtpActivityRecord, 'id' | 'timestamp'>) {
+  smtpActivityLog.unshift({
+    id: generateId('SMTP'),
+    timestamp: new Date().toISOString(),
+    ...entry,
+  });
+  if (smtpActivityLog.length > 2000) {
+    smtpActivityLog.length = 2000;
+  }
+}
+
+function toLocalDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function buildSmtpMetrics30Days(records: SmtpActivityRecord[]) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const dayMap = new Map<
+    string,
+    { date: string; label: string; sent: number; failed: number; total: number }
+  >();
+  const dailySeries: Array<{
+    date: string;
+    label: string;
+    sent: number;
+    failed: number;
+    total: number;
+  }> = [];
+
+  const monthNames = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+
+  for (let offset = 29; offset >= 0; offset -= 1) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - offset);
+    const key = toLocalDateKey(d);
+    const label = `${monthNames[d.getMonth()]} ${d.getDate()}`;
+    const bucket = { date: key, label, sent: 0, failed: 0, total: 0 };
+    dayMap.set(key, bucket);
+    dailySeries.push(bucket);
+  }
+
+  let sentCount = 0;
+  let failedCount = 0;
+  let withAttachmentsCount = 0;
+
+  for (const record of records) {
+    const parsed = new Date(record.timestamp);
+    if (Number.isNaN(parsed.getTime())) continue;
+    const key = toLocalDateKey(parsed);
+    const bucket = dayMap.get(key);
+    if (!bucket) continue;
+
+    if (record.status === 'Sent') {
+      bucket.sent += 1;
+      sentCount += 1;
+    } else {
+      bucket.failed += 1;
+      failedCount += 1;
+    }
+    bucket.total += 1;
+    if (record.attachmentCount > 0) {
+      withAttachmentsCount += 1;
+    }
+  }
+
+  const total30Days = sentCount + failedCount;
+  const successRatePct =
+    total30Days > 0 ? Math.round((sentCount / total30Days) * 1000) / 10 : 0;
+
+  return {
+    total30Days,
+    sentCount,
+    failedCount,
+    successRatePct,
+    withAttachmentsCount,
+    dailySeries,
+  };
+}
+
+function isSmtpConfigured(cfg: SmtpRuntimeConfig): boolean {
+  return Boolean(cfg.host && cfg.port > 0 && cfg.user && cfg.pass);
+}
+
+function createSmtpTransporter(cfg: SmtpRuntimeConfig) {
+  return nodemailer.createTransport({
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.secure,
+    auth: {
+      user: cfg.user,
+      pass: cfg.pass,
+    },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+  });
+}
+
+function formatSmtpErrorMessage(err: unknown, host: string): string {
+  const raw = err instanceof Error ? err.message : String(err || 'Unknown SMTP error');
+  if (raw.includes('535-5.7.8') || raw.includes('Username and Password not accepted')) {
+    if (host.includes('gmail.com')) {
+      return 'Gmail SMTP rejected the username or password (535). For Gmail with 2-Step Verification, generate a 16-character Google App Password (myaccount.google.com/apppasswords) and use it as the SMTP Password.';
+    }
+    return `SMTP authentication rejected (535): check your SMTP username and password for ${host}.`;
+  }
+  if (raw.includes('ECONNREFUSED') || raw.includes('ENOTFOUND') || raw.includes('ETIMEDOUT')) {
+    return `Could not connect to SMTP server ${host}: ${raw}. Verify the SMTP Host, Port, and TLS/SSL setting.`;
+  }
+  return raw;
+}
+
 async function startServer() {
   const app = express();
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({
@@ -777,6 +956,358 @@ async function startServer() {
   app.get('/api/sms/logs', (_req, res) => {
     expireStaleChallenges();
     res.json({ events: smsAuditEvents });
+  });
+
+  // Live SMTP Mail Server Endpoints (Nodemailer)
+  app.get('/api/email/smtp-status', (_req, res) => {
+    res.json({
+      configured: isSmtpConfigured(runtimeSmtpConfig),
+      source: runtimeSmtpConfig.source,
+      host: runtimeSmtpConfig.host,
+      port: runtimeSmtpConfig.port,
+      secure: runtimeSmtpConfig.secure,
+      user: runtimeSmtpConfig.user,
+      hasPassword: Boolean(runtimeSmtpConfig.pass),
+      fromName: runtimeSmtpConfig.fromName,
+      fromEmail: runtimeSmtpConfig.fromEmail || runtimeSmtpConfig.user,
+    });
+  });
+
+  app.post('/api/email/smtp-config', async (req, res) => {
+    const body = req.body ?? {};
+    const host = String(body.host ?? runtimeSmtpConfig.host).trim();
+    const port = Number(body.port ?? runtimeSmtpConfig.port) || 587;
+    const secure =
+      typeof body.secure === 'boolean' ? body.secure : port === 465;
+    const user = String(body.user ?? runtimeSmtpConfig.user).trim();
+    const incomingPass = typeof body.pass === 'string' ? body.pass : '';
+    const pass = incomingPass ? incomingPass : runtimeSmtpConfig.pass;
+    const fromName = String(
+      body.fromName ?? runtimeSmtpConfig.fromName ?? 'Vinshar Facility Management ERP'
+    ).trim();
+    const fromEmail = String(body.fromEmail ?? user).trim() || user;
+    const shouldVerify = body.verify !== false;
+
+    if (!host || !user || !pass) {
+      return res.status(400).json({
+        error: 'INVALID_SMTP_CONFIG',
+        message: 'SMTP Host, SMTP Username/Email, and SMTP Password are required.',
+      });
+    }
+
+    const candidate: SmtpRuntimeConfig = {
+      host,
+      port,
+      secure,
+      user,
+      pass,
+      fromName: fromName || 'Vinshar Facility Management ERP',
+      fromEmail,
+      source: 'runtime',
+    };
+
+    if (shouldVerify) {
+      try {
+        const transporter = createSmtpTransporter(candidate);
+        await transporter.verify();
+      } catch (err) {
+        return res.status(502).json({
+          error: 'SMTP_VERIFY_FAILED',
+          message: formatSmtpErrorMessage(err, candidate.host),
+        });
+      }
+    }
+
+    runtimeSmtpConfig = candidate;
+    return res.json({
+      ok: true,
+      configured: true,
+      verified: shouldVerify,
+      source: runtimeSmtpConfig.source,
+      host: runtimeSmtpConfig.host,
+      port: runtimeSmtpConfig.port,
+      secure: runtimeSmtpConfig.secure,
+      user: runtimeSmtpConfig.user,
+      hasPassword: true,
+      fromName: runtimeSmtpConfig.fromName,
+      fromEmail: runtimeSmtpConfig.fromEmail,
+    });
+  });
+
+  app.post('/api/email/smtp-test', async (req, res) => {
+    const body = req.body ?? {};
+    const host = String(body.host ?? runtimeSmtpConfig.host).trim();
+    const port = Number(body.port ?? runtimeSmtpConfig.port) || 587;
+    const secure =
+      typeof body.secure === 'boolean' ? body.secure : port === 465;
+    const user = String(body.user ?? runtimeSmtpConfig.user).trim();
+    const incomingPass = typeof body.pass === 'string' ? body.pass : '';
+    const pass = incomingPass ? incomingPass : runtimeSmtpConfig.pass;
+
+    if (!host || port <= 0 || port > 65535) {
+      return res.status(400).json({
+        ok: false,
+        error: 'INVALID_HOST',
+        message: 'Please enter a valid SMTP Host and Port (e.g. smtp.gmail.com:587).',
+      });
+    }
+
+    const startedAt = Date.now();
+
+    const pingTcpAndBanner = () =>
+      new Promise<{ ms: number; banner: string }>((resolve, reject) => {
+        const socket = net.createConnection({ host, port });
+        let settled = false;
+        let connectMs = 0;
+
+        const overallTimer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          socket.destroy();
+          if (connectMs > 0) {
+            resolve({ ms: connectMs, banner: '' });
+          } else {
+            reject(new Error(`ETIMEDOUT: Connection to ${host}:${port} timed out after 6s`));
+          }
+        }, 6000);
+
+        socket.once('connect', () => {
+          connectMs = Date.now() - startedAt;
+          // If implicit SSL port (465), raw TCP won't receive cleartext 220 banner; resolve immediately
+          if (secure || port === 465) {
+            settled = true;
+            clearTimeout(overallTimer);
+            socket.end();
+            resolve({ ms: connectMs, banner: '' });
+            return;
+          }
+          // Wait briefly (up to 1500ms) for cleartext SMTP 220 greeting banner
+          const bannerTimer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(overallTimer);
+            socket.end();
+            resolve({ ms: connectMs, banner: '' });
+          }, 1500);
+
+          socket.once('data', (chunk) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(bannerTimer);
+            clearTimeout(overallTimer);
+            const banner = chunk.toString('utf8').split(/\r?\n/)[0]?.trim() || '';
+            socket.end();
+            resolve({ ms: Date.now() - startedAt, banner });
+          });
+        });
+
+        socket.once('error', (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(overallTimer);
+          socket.destroy();
+          reject(err);
+        });
+      });
+
+    let tcpLatencyMs = 0;
+    let smtpBanner = '';
+    try {
+      const pingRes = await pingTcpAndBanner();
+      tcpLatencyMs = pingRes.ms;
+      smtpBanner = pingRes.banner;
+    } catch (err) {
+      return res.status(502).json({
+        ok: false,
+        error: 'SMTP_HOST_UNREACHABLE',
+        host,
+        port,
+        latencyMs: Date.now() - startedAt,
+        message: formatSmtpErrorMessage(err, host),
+      });
+    }
+
+    if (!user || !pass) {
+      const bannerNote = smtpBanner ? ` (${smtpBanner})` : '';
+      return res.json({
+        ok: true,
+        mode: 'host_ping_only',
+        host,
+        port,
+        secure,
+        latencyMs: tcpLatencyMs,
+        tcpPingMs: tcpLatencyMs,
+        message: `SMTP host ${host}:${port} ping succeeded in ${tcpLatencyMs} ms${bannerNote}. Enter SMTP Username & Password / App Password to also verify login.`,
+      });
+    }
+
+    try {
+      const transporter = createSmtpTransporter({
+        host,
+        port,
+        secure,
+        user,
+        pass,
+        fromName: runtimeSmtpConfig.fromName,
+        fromEmail: user,
+        source: 'runtime',
+      });
+      await transporter.verify();
+      const totalMs = Date.now() - startedAt;
+      return res.json({
+        ok: true,
+        mode: 'full_handshake',
+        host,
+        port,
+        secure,
+        latencyMs: totalMs,
+        tcpPingMs: tcpLatencyMs,
+        message: `SMTP connection verified for ${host}:${port} (${totalMs} ms round-trip, ping ${tcpLatencyMs} ms). Ready to send as ${user}.`,
+      });
+    } catch (err) {
+      return res.status(502).json({
+        ok: false,
+        mode: 'full_handshake',
+        error: 'SMTP_AUTH_OR_TLS_FAILED',
+        host,
+        port,
+        latencyMs: Date.now() - startedAt,
+        tcpPingMs: tcpLatencyMs,
+        message: formatSmtpErrorMessage(err, host),
+      });
+    }
+  });
+
+  app.post('/api/email/smtp-reset', (_req, res) => {
+    runtimeSmtpConfig = getEnvSmtpDefaults();
+    res.json({
+      ok: true,
+      configured: isSmtpConfigured(runtimeSmtpConfig),
+      source: runtimeSmtpConfig.source,
+      host: runtimeSmtpConfig.host,
+      port: runtimeSmtpConfig.port,
+      secure: runtimeSmtpConfig.secure,
+      user: runtimeSmtpConfig.user,
+      hasPassword: Boolean(runtimeSmtpConfig.pass),
+      fromName: runtimeSmtpConfig.fromName,
+      fromEmail: runtimeSmtpConfig.fromEmail || runtimeSmtpConfig.user,
+    });
+  });
+
+  app.get('/api/email/smtp-logs', (_req, res) => {
+    res.json({
+      logs: smtpActivityLog.slice(0, 20),
+      metrics: buildSmtpMetrics30Days(smtpActivityLog),
+    });
+  });
+
+  app.post('/api/email/send', async (req, res) => {
+    const body = req.body ?? {};
+    const to = String(body.to || '').trim();
+    const cc = String(body.cc || '').trim();
+    const subject = String(body.subject || '').trim();
+    const text = String(body.body || '').trim();
+    const replyTo = String(body.replyTo || '').trim();
+    const rawAttachments: unknown[] = Array.isArray(body.attachments) ? body.attachments : [];
+
+    if (!isSmtpConfigured(runtimeSmtpConfig)) {
+      if (to && subject) {
+        pushSmtpActivityLog({
+          to,
+          cc: cc || undefined,
+          from: runtimeSmtpConfig.fromEmail || runtimeSmtpConfig.user || 'Unconfigured',
+          subject,
+          status: 'Failed',
+          smtpHost: runtimeSmtpConfig.host || undefined,
+          errorMessage: 'SMTP mail server is not configured yet.',
+          attachmentCount: rawAttachments.length,
+        });
+      }
+      return res.status(400).json({
+        error: 'SMTP_NOT_CONFIGURED',
+        message:
+          'SMTP mail server is not configured yet. Configure your SMTP Host, Username, and App Password before sending.',
+      });
+    }
+
+    if (!to || !subject || !text) {
+      return res.status(400).json({
+        error: 'INVALID_EMAIL_PAYLOAD',
+        message: 'Recipient email (To), Subject, and Message Body are required.',
+      });
+    }
+
+    const attachments = rawAttachments
+      .filter(
+        (att): att is { filename: string; contentBase64: string; contentType?: string } =>
+          Boolean(
+            att &&
+              typeof att === 'object' &&
+              typeof (att as { filename?: unknown }).filename === 'string' &&
+              typeof (att as { contentBase64?: unknown }).contentBase64 === 'string'
+          )
+      )
+      .map((att) => ({
+        filename: att.filename.replace(/[\r\n]/g, ''),
+        content: Buffer.from(att.contentBase64, 'base64'),
+        contentType: att.contentType || 'application/pdf',
+      }));
+
+    const senderEmail = runtimeSmtpConfig.fromEmail || runtimeSmtpConfig.user;
+    const fromHeader = runtimeSmtpConfig.fromName
+      ? `"${runtimeSmtpConfig.fromName.replace(/"/g, '')}" <${senderEmail}>`
+      : senderEmail;
+
+    try {
+      const transporter = createSmtpTransporter(runtimeSmtpConfig);
+      const info = await transporter.sendMail({
+        from: fromHeader,
+        to,
+        ...(cc ? { cc } : {}),
+        ...(replyTo ? { replyTo } : {}),
+        subject,
+        text,
+        attachments,
+      });
+
+      pushSmtpActivityLog({
+        to,
+        cc: cc || undefined,
+        from: senderEmail,
+        subject,
+        status: 'Sent',
+        messageId: info.messageId,
+        smtpHost: runtimeSmtpConfig.host,
+        response: info.response,
+        attachmentCount: attachments.length,
+      });
+
+      return res.json({
+        ok: true,
+        messageId: info.messageId,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        response: info.response,
+        fromEmail: senderEmail,
+        smtpHost: runtimeSmtpConfig.host,
+      });
+    } catch (err) {
+      const msg = formatSmtpErrorMessage(err, runtimeSmtpConfig.host);
+      pushSmtpActivityLog({
+        to,
+        cc: cc || undefined,
+        from: senderEmail,
+        subject,
+        status: 'Failed',
+        smtpHost: runtimeSmtpConfig.host,
+        errorMessage: msg,
+        attachmentCount: attachments.length,
+      });
+      return res.status(502).json({
+        error: 'SMTP_SEND_FAILED',
+        message: msg,
+      });
+    }
   });
 
   const isProd = process.env.NODE_ENV === 'production';

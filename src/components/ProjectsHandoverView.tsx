@@ -7,8 +7,9 @@ import type {
   ProjectRecord,
 } from '../types/erp';
 import { formatInrCompact, formatInrFull } from '../utils/formatters';
-import { downloadDocumentPdf } from '../utils/pdfGenerator';
+import { buildPdfBlob, downloadDocumentPdf, type PdfDocumentSpec } from '../utils/pdfGenerator';
 import { DocumentActionBar } from './DocumentActionBar';
+import { DocumentActivityTrail } from './DocumentActivityTrail';
 import type { EmailComposeContext } from './EmailComposeModal';
 import { EmbeddedProjectEmailPanel } from './ProjectEmailSectionView';
 import type { SmsVerifyModalContext } from './SmsVerifyModal';
@@ -45,7 +46,7 @@ export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
 }) => {
   const [selectedId, setSelectedId] = useState(initialProjectId || projects[0]?.id || '');
   const [showVersionsModal, setShowVersionsModal] = useState(false);
-  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [savedAtById, setSavedAtById] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (initialProjectId && projects.some((p) => p.id === initialProjectId)) {
@@ -59,6 +60,7 @@ export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
 
   const activeClient = clients.find((c) => c.id === active.clientId);
   const activeSnapshots = projectSnapshots.filter((s) => s.entityId === active.id);
+  const activeSavedAt = savedAtById[active.id] || activeSnapshots[0]?.savedAt || null;
   const completedCount = active.checklist.filter((c) => c.completed).length;
   const allCompleted = completedCount === active.checklist.length;
   const isActivated = active.closingStatus === 'Project Activated';
@@ -69,38 +71,40 @@ export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
       active,
       `Saved handover state (${completedCount}/${active.checklist.length} checks · ${active.closingStatus})`
     );
-    setLastSavedAt(new Date().toISOString());
+    setSavedAtById((prev) => ({ ...prev, [active.id]: new Date().toISOString() }));
   };
 
+  const buildProjectPdfSpec = (): PdfDocumentSpec => ({
+    filename: projectPdfName,
+    headerBanner: 'FACILITY MANAGEMENT ERP · PROJECT HANDOVER DOSSIER',
+    title: `${active.code} · ${active.clientName}`,
+    subtitle: `${active.siteName} · ${active.industry}`,
+    metaPairs: [
+      ['Project Code', active.code],
+      ['Closing Status', active.closingStatus],
+      ['Agreement Ref', active.agreementId],
+      ['Approved Manpower', `${active.approvedManpower} Personnel`],
+      ['Ops Manager', active.opsManager],
+      ['Mobilization Date', active.mobilizationDate],
+    ],
+    tableTitle: 'Mandatory 9-Point Closing & Handover Checklist',
+    tableHeaders: ['Checkpoint', 'Owner Dept', 'Verified By', 'Status'],
+    tableRows: active.checklist.map((item) => [
+      item.label,
+      item.ownerDept,
+      item.verifiedBy || '-',
+      item.completed ? 'Verified' : 'Pending',
+    ]),
+    summaryRows: [
+      ['Checklist Progress', `${completedCount} / ${active.checklist.length} Completed`],
+      ['Monthly Billing', formatInrFull(active.monthlyBilling)],
+      ['Annual Contract Value', formatInrFull(active.annualValue)],
+    ],
+    footerNote: `HR: ${active.hrCoordinator} · Finance: ${active.financeCoordinator}`,
+  });
+
   const handleDownloadProjectPdf = () => {
-    downloadDocumentPdf({
-      filename: projectPdfName,
-      headerBanner: 'FACILITY MANAGEMENT ERP · PROJECT HANDOVER DOSSIER',
-      title: `${active.code} · ${active.clientName}`,
-      subtitle: `${active.siteName} · ${active.industry}`,
-      metaPairs: [
-        ['Project Code', active.code],
-        ['Closing Status', active.closingStatus],
-        ['Agreement Ref', active.agreementId],
-        ['Approved Manpower', `${active.approvedManpower} Personnel`],
-        ['Ops Manager', active.opsManager],
-        ['Mobilization Date', active.mobilizationDate],
-      ],
-      tableTitle: 'Mandatory 9-Point Closing & Handover Checklist',
-      tableHeaders: ['Checkpoint', 'Owner Dept', 'Verified By', 'Status'],
-      tableRows: active.checklist.map((item) => [
-        item.label,
-        item.ownerDept,
-        item.verifiedBy || '-',
-        item.completed ? 'Verified' : 'Pending',
-      ]),
-      summaryRows: [
-        ['Checklist Progress', `${completedCount} / ${active.checklist.length} Completed`],
-        ['Monthly Billing', formatInrFull(active.monthlyBilling)],
-        ['Annual Contract Value', formatInrFull(active.annualValue)],
-      ],
-      footerNote: `HR: ${active.hrCoordinator} · Finance: ${active.financeCoordinator}`,
-    });
+    downloadDocumentPdf(buildProjectPdfSpec());
   };
 
   const handleOpenProjectEmail = () => {
@@ -117,6 +121,7 @@ export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
       body: `Dear ${activeClient?.contactPerson || 'Team'},\n\nPlease find the latest handover & mobilization dossier for ${active.code} (${active.siteName}).\n\nProject Summary:\n- Current Status: ${active.closingStatus}\n- Handover Checks Completed: ${completedCount} / ${active.checklist.length}\n- Approved Manpower: ${active.approvedManpower} staff\n- Operations Lead: ${active.opsManager}\n- Monthly Billing Base: ${formatInrFull(active.monthlyBilling)}\n\nPlease reply to this thread for any site onboarding or compliance coordination.\n\nRegards,\nProject Delivery & Operations\nFacility Management ERP`,
       attachmentName: projectPdfName,
       onDownloadPdf: handleDownloadProjectPdf,
+      buildAttachmentBlob: () => buildPdfBlob(buildProjectPdfSpec()),
     });
   };
 
@@ -187,8 +192,8 @@ export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
                   onOpenVersions={() => setShowVersionsModal(true)}
                   onOpenEmail={handleOpenProjectEmail}
                   onDownloadPdf={handleDownloadProjectPdf}
-                  versionCount={activeSnapshots.length || 1}
-                  lastSavedAt={lastSavedAt}
+                  versionCount={activeSnapshots.length}
+                  lastSavedAt={activeSavedAt}
                 />
                 {!isActivated ? (
                   <button
@@ -279,6 +284,13 @@ export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
             </div>
           </div>
 
+          <DocumentActivityTrail
+            entityLabel={active.code}
+            snapshots={activeSnapshots}
+            onOpenVersions={() => setShowVersionsModal(true)}
+            showEmailLog={false}
+          />
+
           <EmbeddedProjectEmailPanel
             project={active}
             client={activeClient}
@@ -299,7 +311,7 @@ export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
         snapshots={activeSnapshots}
         onCreateSnapshot={(note) => {
           onSaveProjectSnapshot(active, note);
-          setLastSavedAt(new Date().toISOString());
+          setSavedAtById((prev) => ({ ...prev, [active.id]: new Date().toISOString() }));
         }}
       />
     </div>

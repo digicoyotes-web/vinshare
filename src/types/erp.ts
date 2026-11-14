@@ -384,13 +384,16 @@ export interface ProjectEmailRecord {
   attachmentName?: string;
   attachmentNames?: string[];
   status: 'Sent' | 'Delivered' | 'Opened' | 'Replied';
+  deliveryChannel?: 'smtp' | 'erp_log';
+  smtpMessageId?: string;
+  smtpHost?: string;
   sentAt: string;
   sentBy: string;
 }
 
 export interface DocumentVersionSnapshot {
   id: string;
-  entityType: 'invoice' | 'project';
+  entityType: 'proposal' | 'invoice' | 'project';
   entityId: string;
   version: string;
   savedAt: string;
@@ -416,6 +419,7 @@ export interface VirtualDocumentFile {
   savedBy: string;
   sizeBytes: number;
   buildPdf: () => void;
+  buildPdfBlob: () => Blob;
 }
 
 
