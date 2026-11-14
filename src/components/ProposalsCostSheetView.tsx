@@ -29,6 +29,7 @@ import type {
 import { loadMasterSettings } from '../utils/erpSettings';
 import { calculateCostSheetFinancials, downloadCsv, formatInrFull } from '../utils/formatters';
 import { buildPdfBlob, downloadDocumentPdf, type PdfDocumentSpec } from '../utils/pdfGenerator';
+import { buildGmailComposeUrl } from '../services/smtpApi';
 import { DocumentActionBar } from './DocumentActionBar';
 import { DocumentActivityTrail } from './DocumentActivityTrail';
 import type { EmailComposeContext } from './EmailComposeModal';
@@ -397,6 +398,25 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
     downloadDocumentPdf(buildActiveProposalPdfSpec());
   };
 
+  const maxProposalEmailLines = 8;
+  const proposalLineItemEntries = [
+    ...activeVersion.lineItems.slice(0, maxProposalEmailLines).map((item) => {
+      const lineTotal = Math.round(item.quantity * item.unitRate * (1 + item.statutoryPct / 100));
+      return `- ${item.designationOrItem} (${item.category}): ${item.quantity} x ${formatInrFull(item.unitRate)} = ${formatInrFull(lineTotal)}/mo`;
+    }),
+    ...(activeVersion.lineItems.length > maxProposalEmailLines
+      ? [`- (+${activeVersion.lineItems.length - maxProposalEmailLines} more cost sheet items)`]
+      : []),
+  ];
+
+  const proposalEmailDraft = {
+    to: activeClient?.email || '',
+    subject: `Commercial Proposal ${activeProposal.reference} (${activeVersion.version}) — ${activeClient?.companyName || ''}`,
+    body: `COMMERCIAL PROPOSAL ${activeProposal.reference} (${activeVersion.version})\nClient: ${activeClient?.companyName || activeProposal.clientId} (${activeClient?.email || 'Authorized Signatory'})\nSite: ${activeProposal.siteName} · Term: ${activeProposal.contractDurationMonths} Months\nServices: ${activeProposal.selectedServices.join(', ')}\nMonthly Commercials: ${formatInrFull(activeVersion.monthlySellingPrice)} (excl. GST)\nAnnual Contract Value: ${formatInrFull(activeVersion.annualContractValue)}\nValid Until: ${activeProposal.validityDate}\n\nLine Items:\n${proposalLineItemEntries.join('\n')}\n\nNotes:\n${activeProposal.gstNote || 'GST @18% Extra.'} Kindly review and let us know if you would like any scope adjustments or proceed to LOI issuance.\n\nWarm regards,\nCommercial & Estimation Desk\nFacility Management ERP`,
+  };
+
+  const proposalGmailUrl = buildGmailComposeUrl(proposalEmailDraft);
+
   const handleOpenProposalEmail = () => {
     onOpenEmailCompose({
       projectId: activeProposal.opportunityId,
@@ -406,9 +426,9 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
       entityReference: `${activeProposal.reference} (${activeVersion.version})`,
       clientId: activeProposal.clientId,
       clientName: activeClient?.companyName || activeProposal.clientId,
-      toEmail: activeClient?.email || '',
-      subject: `Commercial Proposal ${activeProposal.reference} (${activeVersion.version}) — ${activeClient?.companyName || ''}`,
-      body: `Dear ${activeClient?.contactPerson || 'Sir / Madam'},\n\nPlease find attached our Commercial Facility Management Proposal ${activeProposal.reference} (${activeVersion.version}) for ${activeProposal.siteName}.\n\nKey Commercial Summary:\n- Services Included: ${activeProposal.selectedServices.join(', ')}\n- Contract Duration: ${activeProposal.contractDurationMonths} Months\n- Monthly Commercials: ${formatInrFull(activeVersion.monthlySellingPrice)} (excl. GST)\n- Annual Contract Value: ${formatInrFull(activeVersion.annualContractValue)}\n- Proposal Validity: ${activeProposal.validityDate}\n\nKindly review and let us know if you would like any scope adjustments or proceed to LOI issuance.\n\nWarm regards,\nCommercial & Estimation Desk\nFacility Management ERP`,
+      toEmail: proposalEmailDraft.to,
+      subject: proposalEmailDraft.subject,
+      body: proposalEmailDraft.body,
       attachmentName: proposalPdfName,
       onDownloadPdf: handleDownloadProposalPdf,
       buildAttachmentBlob: () => buildPdfBlob(buildActiveProposalPdfSpec()),
@@ -521,6 +541,8 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
             onOpenVersions={() => setShowVersionsModal(true)}
             onOpenEmail={handleOpenProposalEmail}
             onDownloadPdf={handleDownloadProposalPdf}
+            gmailComposeUrl={proposalGmailUrl}
+            emailLabel="SMTP Dispatch"
             versionCount={activeProposal.versions.length}
             lastSavedAt={activeSavedAt}
           />

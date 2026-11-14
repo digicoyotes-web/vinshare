@@ -123,6 +123,25 @@ export function buildMailtoFallbackHref(params: {
   return `mailto:${encodeURIComponent(params.to.trim())}${query ? `?${query}` : ''}`;
 }
 
+export function buildGmailComposeUrl(params: {
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+}): string {
+  const qs = new URLSearchParams();
+  qs.set('fs', '1');
+  if (params.to?.trim()) qs.set('to', params.to.trim());
+  if (params.subject?.trim()) qs.set('su', params.subject.trim());
+  const cleanBody = (params.body || '').trim();
+  if (cleanBody) {
+    qs.set('body', cleanBody.length > 1400 ? `${cleanBody.slice(0, 1397)}...` : cleanBody);
+  }
+  if (params.cc?.trim()) qs.set('cc', params.cc.trim());
+  qs.set('tf', 'cm');
+  return `https://mail.google.com/mail/u/0/?${qs.toString()}`;
+}
+
 export async function fetchSmtpStatus(): Promise<SmtpStatusDto> {
   const res = await fetch('/api/email/smtp-status');
   const { data, nonJsonDetail } = await readJsonPayload(res);

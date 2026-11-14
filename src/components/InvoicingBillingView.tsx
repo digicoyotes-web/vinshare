@@ -10,6 +10,7 @@ import type {
 import { loadMasterSettings } from '../utils/erpSettings';
 import { formatInrFull } from '../utils/formatters';
 import { buildPdfBlob, downloadDocumentPdf, type PdfDocumentSpec } from '../utils/pdfGenerator';
+import { buildGmailComposeUrl } from '../services/smtpApi';
 import { DocumentActionBar } from './DocumentActionBar';
 import { DocumentActivityTrail } from './DocumentActivityTrail';
 import type { EmailComposeContext } from './EmailComposeModal';
@@ -256,6 +257,27 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
             downloadDocumentPdf(buildInvoicePdfSpec());
           };
 
+          const maxInvoiceEmailLines = 8;
+          const invoiceLineItemEntries = [
+            ...active.lineItems.slice(0, maxInvoiceEmailLines).map(
+              (li) => `- ${li.description}${li.sourceRef ? ` (${li.sourceRef})` : ''}: ${formatInrFull(li.amount)}`
+            ),
+            ...(active.lineItems.length > maxInvoiceEmailLines
+              ? [`- (+${active.lineItems.length - maxInvoiceEmailLines} more line items)`]
+              : []),
+            ...(active.deductions > 0
+              ? [`- SLA / Contract Deductions: -${formatInrFull(active.deductions)}`]
+              : []),
+          ];
+
+          const invoiceEmailDraft = {
+            to: activeClient?.email || '',
+            subject: `Tax Invoice ${active.invoiceNumber} (${active.billingPeriod}) — ${active.clientName}`,
+            body: `TAX INVOICE ${active.invoiceNumber}\nClient: ${active.clientName} (${activeClient?.email || 'Accounts Payable'})\nPO: ${active.poNumber} · Billing Period: ${active.billingPeriod}\nTaxable Value: ${formatInrFull(active.taxableValue)}\nTotal GST (${active.placeOfSupply}): ${formatInrFull(active.cgst + active.sgst + active.igst)}\nTotal: ${formatInrFull(active.totalAmount)}\nDue: ${active.dueDate}\n\nLine Items:\n${invoiceLineItemEntries.join('\n')}\n\nNotes:\nKindly process payment on or before ${active.dueDate} via NEFT/RTGS/UPI and share UTR details for reconciliation.\n\nRegards,\nFinance & Billing Desk\nFacility Management ERP`,
+          };
+
+          const invoiceGmailUrl = buildGmailComposeUrl(invoiceEmailDraft);
+
           const handleOpenInvoiceEmail = () => {
             onOpenEmailCompose({
               projectId: active.projectId,
@@ -265,9 +287,9 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
               entityReference: active.invoiceNumber,
               clientId: active.clientId,
               clientName: active.clientName,
-              toEmail: activeClient?.email || '',
-              subject: `Tax Invoice ${active.invoiceNumber} (${active.billingPeriod}) — ${active.clientName}`,
-              body: `Dear ${activeClient?.contactPerson || 'Accounts Payable Team'},\n\nPlease find attached Tax Invoice ${active.invoiceNumber} for the billing period ${active.billingPeriod} against PO ${active.poNumber}.\n\nInvoice Summary:\n- Taxable Value: ${formatInrFull(active.taxableValue)}\n- Total GST (${active.placeOfSupply}): ${formatInrFull(active.cgst + active.sgst + active.igst)}\n- Invoice Total: ${formatInrFull(active.totalAmount)}\n- Due Date: ${active.dueDate}\n\nKindly process payment on or before the due date and share UTR details for reconciliation.\n\nRegards,\nFinance & Billing Desk\nFacility Management ERP`,
+              toEmail: invoiceEmailDraft.to,
+              subject: invoiceEmailDraft.subject,
+              body: invoiceEmailDraft.body,
               attachmentName: invoicePdfName,
               onDownloadPdf: handleDownloadInvoicePdf,
               buildAttachmentBlob: () => buildPdfBlob(buildInvoicePdfSpec()),
@@ -293,6 +315,8 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
                   onOpenVersions={() => setShowVersionsModal(true)}
                   onOpenEmail={handleOpenInvoiceEmail}
                   onDownloadPdf={handleDownloadInvoicePdf}
+                  gmailComposeUrl={invoiceGmailUrl}
+                  emailLabel="SMTP Dispatch"
                   versionCount={activeSnapshots.length}
                   lastSavedAt={activeSavedAt}
                 />

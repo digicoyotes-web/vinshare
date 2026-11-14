@@ -24,6 +24,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  buildGmailComposeUrl,
   buildMailtoFallbackHref,
   fetchSmtpStatus,
   getDevelopmentBackendUrl,
@@ -126,6 +127,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const [errorHint, setErrorHint] = useState<string | null>(null);
   const [errorClues, setErrorClues] = useState<string[]>([]);
   const [isStaticPreviewError, setIsStaticPreviewError] = useState(false);
+  const [staticHostDetected, setStaticHostDetected] = useState(false);
   const [sentResult, setSentResult] = useState<{
     channel: 'smtp' | 'erp_log';
     messageId?: string;
@@ -147,6 +149,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     setErrorHint(null);
     setErrorClues([]);
     setIsStaticPreviewError(false);
+    setStaticHostDetected(false);
     setSmtpSaveNotice(null);
     setFsOpen(false);
     setFsQuery('');
@@ -169,6 +172,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     fetchSmtpStatus()
       .then((status) => {
         if (cancelled) return;
+        setStaticHostDetected(false);
         setSmtpStatus(status);
         setSmtpHost(status.host || 'smtp.gmail.com');
         setSmtpPort(status.port || 587);
@@ -180,12 +184,11 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       })
       .catch((err) => {
         if (!cancelled) {
-          setSmtpConfigOpen(true);
-          if (err instanceof SmtpConnectionError) {
-            setErrorMsg(err.message);
-            setErrorHint(err.actionHint || null);
-            setErrorClues(err.debuggingClues || []);
-            setIsStaticPreviewError(err.status === 405 || err.smtpErrorCode === 'HTTP_405');
+          if (err instanceof SmtpConnectionError && (err.status === 405 || err.smtpErrorCode === 'HTTP_405')) {
+            setStaticHostDetected(true);
+            setSmtpConfigOpen(false);
+          } else {
+            setSmtpConfigOpen(true);
           }
         }
       })
@@ -741,34 +744,68 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                     />
                     {smtpLoading
                       ? 'Checking SMTP server configuration...'
+                      : staticHostDetected
+                      ? 'Static Frontend Mode · Direct Gmail Recommended'
                       : smtpStatus?.configured
                       ? `SMTP Ready · ${smtpStatus.host}:${smtpStatus.port} (${smtpStatus.fromEmail})`
                       : 'SMTP Server Not Configured'}
                   </div>
                   <p className="text-[11px] text-slate-600 mt-0.5">
-                    {smtpStatus?.configured
+                    {staticHostDetected
+                      ? 'This URL serves static frontend files without the Node.js Express SMTP backend (`server.ts`). Click "Open in Gmail" below to send immediately via Gmail Web, or open the Development App URL / run `npm run dev` for server-side SMTP.'
+                      : smtpStatus?.configured
                       ? 'Emails and attached PDFs will be delivered via your configured SMTP relay.'
                       : 'Configure your SMTP host, port, username, and password/app password to send real emails.'}
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setSmtpConfigOpen(!smtpConfigOpen)}
-                  className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#14263D] hover:bg-slate-50 shrink-0"
-                >
-                  {smtpConfigOpen ? (
-                    <>
-                      Hide SMTP Setup
-                      <ChevronUp className="h-3 w-3" />
-                    </>
-                  ) : (
-                    <>
-                      {smtpStatus?.configured ? 'Edit SMTP' : 'Configure SMTP'}
-                      <ChevronDown className="h-3 w-3" />
-                    </>
-                  )}
-                </button>
+                {staticHostDetected ? (
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    <a
+                      href={buildGmailComposeUrl({
+                        to: toEmail,
+                        cc: ccEmails,
+                        subject,
+                        body,
+                      })}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] font-semibold text-rose-800 hover:bg-rose-100"
+                    >
+                      <Mail className="h-3 w-3 text-rose-700" />
+                      Open in Gmail
+                    </a>
+                    {getDevelopmentBackendUrl() && (
+                      <a
+                        href={getDevelopmentBackendUrl()!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 rounded-md bg-[#14263D] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-slate-800"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                        Live Backend
+                      </a>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setSmtpConfigOpen(!smtpConfigOpen)}
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#14263D] hover:bg-slate-50 shrink-0"
+                  >
+                    {smtpConfigOpen ? (
+                      <>
+                        Hide SMTP Setup
+                        <ChevronUp className="h-3 w-3" />
+                      </>
+                    ) : (
+                      <>
+                        {smtpStatus?.configured ? 'Edit SMTP' : 'Configure SMTP'}
+                        <ChevronDown className="h-3 w-3" />
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
 
               {smtpSaveNotice && (
@@ -976,6 +1013,20 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                   )}
                   {isStaticPreviewError && (
                     <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <a
+                        href={buildGmailComposeUrl({
+                          to: toEmail,
+                          cc: ccEmails,
+                          subject,
+                          body,
+                        })}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-md border border-rose-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-rose-800 hover:bg-rose-50"
+                      >
+                        <Mail className="h-3 w-3 text-rose-700" />
+                        Open in Gmail
+                      </a>
                       {getDevelopmentBackendUrl() && (
                         <a
                           href={getDevelopmentBackendUrl()!}
@@ -1278,23 +1329,39 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                     Log in ERP Only
                   </button>
                 )}
-                <button
-                  type="submit"
-                  disabled={verifyingBeforeReview || smtpSaving || smtpLoading}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+                <a
+                  href={buildGmailComposeUrl({
+                    to: toEmail,
+                    cc: ccEmails,
+                    subject,
+                    body,
+                  })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs font-semibold text-rose-800 hover:bg-rose-100"
                 >
-                  {verifyingBeforeReview ? (
-                    <>
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      Verifying SMTP...
-                    </>
-                  ) : (
-                    <>
-                      <Send className="h-3.5 w-3.5" />
-                      Review & Send via SMTP
-                    </>
-                  )}
-                </button>
+                  <Mail className="h-3.5 w-3.5 text-rose-700" />
+                  Open in Gmail
+                </a>
+                {!staticHostDetected && (
+                  <button
+                    type="submit"
+                    disabled={verifyingBeforeReview || smtpSaving || smtpLoading}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+                  >
+                    {verifyingBeforeReview ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Verifying SMTP...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="h-3.5 w-3.5" />
+                        Review & Send via SMTP
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
             </div>
           </form>
