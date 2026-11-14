@@ -26,8 +26,10 @@ import {
 import {
   buildGmailComposeUrl,
   buildMailtoFallbackHref,
+  DEFAULT_SENDING_EMAIL,
   fetchSmtpStatus,
   getDevelopmentBackendUrl,
+  renderEmailTemplate,
   saveAndVerifySmtpConfig,
   sendEmailViaSmtp,
   SmtpConnectionError,
@@ -50,6 +52,7 @@ export interface EmailComposeContext {
   subject: string;
   body: string;
   attachmentName?: string;
+  templateVariables?: Record<string, string>;
   onDownloadPdf?: () => void;
   buildAttachmentBlob?: () => Blob;
 }
@@ -112,14 +115,15 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const [smtpHost, setSmtpHost] = useState('smtp.gmail.com');
   const [smtpPort, setSmtpPort] = useState(587);
   const [smtpSecure, setSmtpSecure] = useState(false);
-  const [smtpUser, setSmtpUser] = useState('');
+  const [smtpUser, setSmtpUser] = useState(DEFAULT_SENDING_EMAIL);
   const [smtpPass, setSmtpPass] = useState('');
   const [smtpFromName, setSmtpFromName] = useState('Vinshar Facility Management ERP');
-  const [smtpFromEmail, setSmtpFromEmail] = useState('');
+  const [smtpFromEmail, setSmtpFromEmail] = useState(DEFAULT_SENDING_EMAIL);
   const [showSmtpPass, setShowSmtpPass] = useState(false);
   const [smtpSaving, setSmtpSaving] = useState(false);
   const [smtpSaveNotice, setSmtpSaveNotice] = useState<string | null>(null);
 
+  const [previewStep, setPreviewStep] = useState(false);
   const [confirmStep, setConfirmStep] = useState(false);
   const [verifyingBeforeReview, setVerifyingBeforeReview] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -143,6 +147,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     setSubject(context.subject);
     setBody(context.body);
     setSentResult(null);
+    setPreviewStep(false);
     setConfirmStep(false);
     setIsSending(false);
     setErrorMsg(null);
@@ -177,13 +182,15 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
         setSmtpHost(status.host || 'smtp.gmail.com');
         setSmtpPort(status.port || 587);
         setSmtpSecure(status.secure);
-        setSmtpUser(status.user || '');
+        setSmtpUser(status.user || DEFAULT_SENDING_EMAIL);
         setSmtpFromName(status.fromName || 'Vinshar Facility Management ERP');
-        setSmtpFromEmail(status.fromEmail || status.user || '');
+        setSmtpFromEmail(status.fromEmail || status.user || DEFAULT_SENDING_EMAIL);
         setSmtpConfigOpen(!status.configured);
       })
       .catch((err) => {
         if (!cancelled) {
+          setSmtpUser((prev) => prev || DEFAULT_SENDING_EMAIL);
+          setSmtpFromEmail((prev) => prev || DEFAULT_SENDING_EMAIL);
           if (err instanceof SmtpConnectionError && (err.status === 405 || err.smtpErrorCode === 'HTTP_405')) {
             setStaticHostDetected(true);
             setSmtpConfigOpen(false);
@@ -267,7 +274,124 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     });
   }, [vaultFiles, activeFolder, clientOnlyFilter, context?.clientId, fsQuery]);
 
+  const activeSendingEmail =
+    (smtpStatus?.configured ? smtpStatus.fromEmail : '') ||
+    smtpFromEmail.trim() ||
+    smtpUser.trim() ||
+    DEFAULT_SENDING_EMAIL ||
+    senderEmail;
+
+  const activeSendingName =
+    (smtpStatus?.configured ? smtpStatus.fromName : '') ||
+    smtpFromName.trim() ||
+    senderName ||
+    'Vinshar Facility Management ERP';
+
+  const placeholderVariables = useMemo<Record<string, string>>(() => {
+    const docTypeLabel =
+      context?.entityType === 'proposal'
+        ? 'Commercial Proposal'
+        : context?.entityType === 'invoice'
+        ? 'Tax Invoice'
+        : 'Project Communication';
+    const attachmentNamesList = resolvedSelectedFiles.map((f) => f.filename).join(', ') || 'None';
+    const todayFormatted = new Date().toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+    const toResolved = toEmail.trim() || context?.toEmail || '';
+    const ccResolved = ccEmails.trim() || 'None';
+    const clientResolved = context?.clientName || '';
+    const referenceResolved = context?.entityReference || '';
+    const projectResolved = context?.projectCode || '';
+
+    return {
+      clientName: clientResolved,
+      client_name: clientResolved,
+      client: clientResolved,
+      toEmail: toResolved,
+      to_email: toResolved,
+      clientEmail: toResolved,
+      client_email: toResolved,
+      to: toResolved,
+      ccEmails: ccResolved,
+      cc_emails: ccResolved,
+      cc: ccResolved,
+      reference: referenceResolved,
+      entityReference: referenceResolved,
+      entity_reference: referenceResolved,
+      ref: referenceResolved,
+      invoiceNumber: referenceResolved,
+      invoice_no: referenceResolved,
+      proposalRef: referenceResolved,
+      proposal_ref: referenceResolved,
+      projectCode: projectResolved,
+      project_code: projectResolved,
+      project: projectResolved,
+      documentType: docTypeLabel,
+      document_type: docTypeLabel,
+      entityType: docTypeLabel,
+      entity_type: docTypeLabel,
+      senderName: activeSendingName,
+      sender_name: activeSendingName,
+      fromName: activeSendingName,
+      from_name: activeSendingName,
+      senderEmail: activeSendingEmail,
+      sender_email: activeSendingEmail,
+      fromEmail: activeSendingEmail,
+      from_email: activeSendingEmail,
+      sendingEmail: activeSendingEmail,
+      attachments: attachmentNamesList,
+      attachmentList: attachmentNamesList,
+      attachment_list: attachmentNamesList,
+      attachmentCount: String(resolvedSelectedFiles.length),
+      attachment_count: String(resolvedSelectedFiles.length),
+      date: todayFormatted,
+      today: todayFormatted,
+      currentDate: todayFormatted,
+      current_date: todayFormatted,
+      companyName: 'Vinshar Integrated Services Pvt. Ltd.',
+      company_name: 'Vinshar Integrated Services Pvt. Ltd.',
+      company: 'Vinshar Integrated Services Pvt. Ltd.',
+      ...(context?.templateVariables || {}),
+    };
+  }, [
+    context,
+    toEmail,
+    ccEmails,
+    activeSendingName,
+    activeSendingEmail,
+    resolvedSelectedFiles,
+  ]);
+
+  const renderedSubject = useMemo(
+    () => renderEmailTemplate(subject, placeholderVariables),
+    [subject, placeholderVariables]
+  );
+
+  const renderedBody = useMemo(
+    () => renderEmailTemplate(body, placeholderVariables),
+    [body, placeholderVariables]
+  );
+
+  const totalPlaceholdersReplaced = Array.from(
+    new Set([...renderedSubject.replacedKeys, ...renderedBody.replacedKeys])
+  );
+
+  const totalPlaceholdersUnresolved = Array.from(
+    new Set([...renderedSubject.unresolvedKeys, ...renderedBody.unresolvedKeys])
+  );
+
   if (!context) return null;
+
+  const insertPlaceholderToken = (token: string) => {
+    setBody((prev) => {
+      if (!prev.trim()) return token;
+      const needsSpace = !prev.endsWith(' ') && !prev.endsWith('\n');
+      return `${prev}${needsSpace ? ' ' : ''}${token}`;
+    });
+  };
 
   const toggleFileAttachment = (fileId: string) => {
     setSelectedFileIds((prev) =>
@@ -301,10 +425,10 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     const trimmedUser = smtpUser.trim();
     if (!trimmedUser || /^\d+$/.test(trimmedUser) || !trimmedUser.includes('@')) {
       setErrorMsg(
-        'Enter your full SMTP email address in "SMTP Username / Email" (e.g. digicoyotes@gmail.com), not a numeric value like 1234567890.'
+        `Enter your full SMTP email address in "SMTP Username / Email" (e.g. ${DEFAULT_SENDING_EMAIL}), not a numeric value like 1234567890.`
       );
       setErrorHint(
-        'Use your full Gmail address (e.g. digicoyotes@gmail.com) and a 16-character Google App Password.'
+        `Use your full Gmail address (e.g. ${DEFAULT_SENDING_EMAIL}) and a 16-character Google App Password.`
       );
       return;
     }
@@ -349,7 +473,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const validateFields = (): boolean => {
     const toList = parseEmailList(toEmail);
     if (toList.length === 0 || toList.some((addr) => !EMAIL_ADDR_RE.test(addr))) {
-      setErrorMsg('Please enter a valid recipient email address (e.g. digicoyotes@gmail.com).');
+      setErrorMsg(`Please enter a valid recipient email address (e.g. ${DEFAULT_SENDING_EMAIL}).`);
       return false;
     }
     const ccList = parseEmailList(ccEmails);
@@ -357,19 +481,27 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       setErrorMsg('One or more CC email addresses look invalid.');
       return false;
     }
-    if (!subject.trim()) {
+    if (!renderedSubject.rendered.trim()) {
       setErrorMsg('Please enter an email subject.');
       return false;
     }
-    if (!body.trim()) {
+    if (!renderedBody.rendered.trim()) {
       setErrorMsg('Please enter the message body.');
       return false;
     }
     return true;
   };
 
-  const handleReviewBeforeSend = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleOpenPreview = () => {
+    setErrorMsg(null);
+    if (!renderedSubject.rendered.trim() && !renderedBody.rendered.trim()) {
+      setErrorMsg('Please enter a subject and message body to preview.');
+      return;
+    }
+    setPreviewStep(true);
+  };
+
+  const triggerReviewBeforeSend = async () => {
     setErrorMsg(null);
     if (!validateFields()) return;
 
@@ -381,6 +513,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
 
     if (!smtpStatus?.configured || (smtpConfigOpen && smtpPass.trim())) {
       if (!hasInlineCredentials) {
+        setPreviewStep(false);
         setSmtpConfigOpen(true);
         setErrorMsg(
           'Enter your SMTP Username / Email and Password / App Password in the SMTP Server Settings section above before sending.'
@@ -400,7 +533,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
           user: smtpUser.trim(),
           pass: smtpPass || undefined,
           fromName: smtpFromName.trim() || 'Vinshar Facility Management ERP',
-          fromEmail: (smtpFromEmail || smtpUser).trim(),
+          fromEmail: (smtpFromEmail || smtpUser || DEFAULT_SENDING_EMAIL).trim(),
           verify: true,
         });
         setSmtpStatus(updated);
@@ -409,8 +542,10 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
         setSmtpSaveNotice(
           `SMTP verified & connected (${updated.host}:${updated.port} as ${updated.fromEmail}).`
         );
+        setPreviewStep(false);
         setConfirmStep(true);
       } catch (err) {
+        setPreviewStep(false);
         setSmtpConfigOpen(true);
         setErrorMsg(
           err instanceof Error ? err.message : 'SMTP verification failed.'
@@ -426,7 +561,13 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       return;
     }
 
+    setPreviewStep(false);
     setConfirmStep(true);
+  };
+
+  const handleReviewBeforeSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await triggerReviewBeforeSend();
   };
 
   const handleConfirmSendSmtp = async () => {
@@ -444,12 +585,15 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
         }
       }
 
+      const finalSubject = renderedSubject.rendered.trim();
+      const finalBody = renderedBody.rendered.trim();
+
       const result = await sendEmailViaSmtp({
         to: toEmail.trim(),
         cc: ccEmails.trim() || undefined,
-        subject: subject.trim(),
-        body: body.trim(),
-        replyTo: senderEmail,
+        subject: finalSubject,
+        body: finalBody,
+        replyTo: activeSendingEmail,
         attachments,
       });
 
@@ -458,8 +602,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
         ...context,
         toEmail: toEmail.trim(),
         ccEmails: ccEmails.trim(),
-        subject: subject.trim(),
-        body: body.trim(),
+        subject: finalSubject,
+        body: finalBody,
         attachmentName: names[0],
         attachmentNames: names,
         attachPdf: names.length > 0,
@@ -477,6 +621,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
         toEmail: toEmail.trim(),
       });
       setConfirmStep(false);
+      setPreviewStep(false);
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : 'SMTP delivery failed. Check your SMTP configuration.'
@@ -499,24 +644,27 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const handleSaveErpLogOnly = () => {
     setErrorMsg(null);
     if (!validateFields()) return;
+    const finalSubject = renderedSubject.rendered.trim();
+    const finalBody = renderedBody.rendered.trim();
     const names = resolvedSelectedFiles.map((f) => f.filename);
     onSend({
       ...context,
       toEmail: toEmail.trim(),
       ccEmails: ccEmails.trim(),
-      subject: subject.trim(),
-      body: body.trim(),
+      subject: finalSubject,
+      body: finalBody,
       attachmentName: names[0],
       attachmentNames: names,
       attachPdf: names.length > 0,
       deliveryChannel: 'erp_log',
-      fromEmailUsed: senderEmail,
+      fromEmailUsed: activeSendingEmail,
     });
     setSentResult({
       channel: 'erp_log',
-      fromEmail: senderEmail,
+      fromEmail: activeSendingEmail,
       toEmail: toEmail.trim(),
     });
+    setPreviewStep(false);
   };
 
   return (
@@ -618,6 +766,180 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
               </button>
             </div>
           </div>
+        ) : previewStep ? (
+          <div className="p-5 space-y-4 overflow-y-auto">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50/70 px-4 py-3">
+              <div className="flex items-start gap-2.5">
+                <Eye className="h-4 w-4 text-[#2463EB] shrink-0 mt-0.5" />
+                <div className="text-xs text-[#14263D]">
+                  <div className="font-bold">Final Email Preview (Placeholders Filled)</div>
+                  <p className="text-[11px] text-slate-600 mt-0.5">
+                    Review the exact rendered subject, body, sender address, and attachments before clicking Send.
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {totalPlaceholdersReplaced.length > 0 ? (
+                  <span className="rounded-md border border-emerald-200 bg-[#E8F5EE] px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                    {totalPlaceholdersReplaced.length} placeholder{totalPlaceholdersReplaced.length === 1 ? '' : 's'} filled
+                  </span>
+                ) : (
+                  <span className="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                    Ready to send
+                  </span>
+                )}
+                {totalPlaceholdersUnresolved.length > 0 && (
+                  <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                    Unrecognized: {totalPlaceholdersUnresolved.map((k) => `{{${k}}}`).join(', ')}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+              <div className="border-b border-slate-200 bg-[#F3F6FA]/70 px-4 py-3 space-y-1.5 text-xs">
+                <div className="grid grid-cols-[88px_1fr] gap-2">
+                  <span className="font-semibold text-slate-500">From</span>
+                  <span className="font-mono text-[#14263D]">
+                    {activeSendingName} &lt;{activeSendingEmail}&gt;
+                  </span>
+                </div>
+                <div className="grid grid-cols-[88px_1fr] gap-2">
+                  <span className="font-semibold text-slate-500">To</span>
+                  <span className="font-mono font-semibold text-[#2463EB]">
+                    {toEmail.trim() || <span className="text-rose-600">Missing recipient email</span>}
+                  </span>
+                </div>
+                {ccEmails.trim() && (
+                  <div className="grid grid-cols-[88px_1fr] gap-2">
+                    <span className="font-semibold text-slate-500">CC</span>
+                    <span className="font-mono text-slate-700">{ccEmails.trim()}</span>
+                  </div>
+                )}
+                <div className="grid grid-cols-[88px_1fr] gap-2">
+                  <span className="font-semibold text-slate-500">Subject</span>
+                  <span className="font-semibold text-[#14263D]">
+                    {renderedSubject.rendered.trim() || '(No subject)'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-4 text-xs text-[#14263D] leading-relaxed whitespace-pre-wrap bg-white min-h-[180px] max-h-[320px] overflow-y-auto">
+                {renderedBody.rendered.trim() || '(No message body)'}
+              </div>
+
+              <div className="border-t border-slate-200 bg-slate-50/80 px-4 py-2.5 flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-semibold text-slate-600 flex items-center gap-1">
+                  <Paperclip className="h-3 w-3 text-[#2463EB]" />
+                  Attachments ({resolvedSelectedFiles.length}):
+                </span>
+                {resolvedSelectedFiles.length === 0 ? (
+                  <span className="text-[11px] text-slate-500">No attachments</span>
+                ) : (
+                  resolvedSelectedFiles.map((file) => (
+                    <span
+                      key={file.id}
+                      className="inline-flex items-center gap-1.5 rounded border border-slate-200 bg-white px-2 py-0.5 font-mono text-[11px] text-[#14263D]"
+                    >
+                      <FileText className="h-3 w-3 text-[#2463EB]" />
+                      {file.filename} ({file.sizeLabel})
+                      {file.onDownload && (
+                        <button
+                          type="button"
+                          onClick={file.onDownload}
+                          title="Download PDF"
+                          className="text-[#2463EB] hover:text-blue-800"
+                        >
+                          <Download className="h-3 w-3" />
+                        </button>
+                      )}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {errorMsg && (
+              <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="font-medium">{errorMsg}</div>
+                  {errorHint && (
+                    <div className="text-[11px] text-rose-900">
+                      <span className="font-semibold">Fix: </span>
+                      {errorHint}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  setPreviewStep(false);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                Back to Edit
+              </button>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {!smtpStatus?.configured && (
+                  <button
+                    type="button"
+                    onClick={handleSaveErpLogOnly}
+                    className="rounded-lg border border-slate-300 bg-slate-50 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    Log in ERP Only
+                  </button>
+                )}
+                <a
+                  href={buildGmailComposeUrl({
+                    to: toEmail,
+                    cc: ccEmails,
+                    subject: renderedSubject.rendered,
+                    body: renderedBody.rendered,
+                  })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs font-semibold text-rose-800 hover:bg-rose-100"
+                >
+                  <Mail className="h-3.5 w-3.5 text-rose-700" />
+                  Open in Gmail
+                </a>
+                {!staticHostDetected && (
+                  <button
+                    type="button"
+                    disabled={verifyingBeforeReview || isSending}
+                    onClick={() => {
+                      if (smtpStatus?.configured && !smtpConfigOpen) {
+                        void handleConfirmSendSmtp();
+                      } else {
+                        void triggerReviewBeforeSend();
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+                  >
+                    {verifyingBeforeReview || isSending ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        {isSending ? 'Sending via SMTP...' : 'Verifying SMTP...'}
+                      </>
+                    ) : (
+                      <>
+                        <Send className="h-3.5 w-3.5" />
+                        {smtpStatus?.configured ? 'Send via SMTP' : 'Verify & Send via SMTP'}
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         ) : confirmStep ? (
           <div className="p-5 space-y-4 overflow-y-auto">
             <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50/70 p-4">
@@ -644,7 +966,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
               <div className="grid grid-cols-[100px_1fr] gap-2">
                 <span className="font-semibold text-slate-500">From</span>
                 <span className="font-mono text-[#14263D]">
-                  {smtpStatus?.fromName} &lt;{smtpStatus?.fromEmail}&gt;
+                  {activeSendingName} &lt;{activeSendingEmail}&gt;
                 </span>
               </div>
               <div className="grid grid-cols-[100px_1fr] gap-2">
@@ -657,7 +979,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
               </div>
               <div className="grid grid-cols-[100px_1fr] gap-2">
                 <span className="font-semibold text-slate-500">Subject</span>
-                <span className="font-semibold text-[#14263D]">{subject.trim()}</span>
+                <span className="font-semibold text-[#14263D]">{renderedSubject.rendered.trim()}</span>
               </div>
               <div className="grid grid-cols-[100px_1fr] gap-2">
                 <span className="font-semibold text-slate-500">Attachments</span>
@@ -675,6 +997,12 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                       </span>
                     ))
                   )}
+                </div>
+              </div>
+              <div className="pt-2 border-t border-slate-200">
+                <div className="font-semibold text-slate-500 mb-1">Final Rendered Body</div>
+                <div className="rounded-md border border-slate-200 bg-white p-3 text-xs text-[#14263D] whitespace-pre-wrap max-h-44 overflow-y-auto leading-relaxed">
+                  {renderedBody.rendered.trim()}
                 </div>
               </div>
             </div>
@@ -765,8 +1093,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                       href={buildGmailComposeUrl({
                         to: toEmail,
                         cc: ccEmails,
-                        subject,
-                        body,
+                        subject: renderedSubject.rendered,
+                        body: renderedBody.rendered,
                       })}
                       target="_blank"
                       rel="noopener noreferrer"
@@ -905,12 +1233,12 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                             setSmtpFromEmail(e.target.value);
                           }
                         }}
-                        placeholder="digicoyotes@gmail.com"
+                        placeholder={DEFAULT_SENDING_EMAIL}
                         className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
                       />
                       {/^\d+$/.test(smtpUser.trim()) && (
                         <p className="mt-1 text-[10px] text-rose-600">
-                          Replace &quot;{smtpUser.trim()}&quot; with your full email address (e.g. digicoyotes@gmail.com).
+                          Replace &quot;{smtpUser.trim()}&quot; with your full email address (e.g. {DEFAULT_SENDING_EMAIL}).
                         </p>
                       )}
                     </div>
@@ -960,7 +1288,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                         type="email"
                         value={smtpFromEmail}
                         onChange={(e) => setSmtpFromEmail(e.target.value)}
-                        placeholder="your-email@gmail.com"
+                        placeholder={DEFAULT_SENDING_EMAIL}
                         className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
                       />
                     </div>
@@ -1017,8 +1345,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                         href={buildGmailComposeUrl({
                           to: toEmail,
                           cc: ccEmails,
-                          subject,
-                          body,
+                          subject: renderedSubject.rendered,
+                          body: renderedBody.rendered,
                         })}
                         target="_blank"
                         rel="noopener noreferrer"
@@ -1043,8 +1371,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                           href={buildMailtoFallbackHref({
                             to: toEmail,
                             cc: ccEmails,
-                            subject,
-                            body,
+                            subject: renderedSubject.rendered,
+                            body: renderedBody.rendered,
                           })}
                           className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#14263D] hover:bg-slate-50"
                         >
@@ -1098,7 +1426,24 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-[11px] font-medium text-slate-600 mb-1">Message Body</label>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                <label className="block text-[11px] font-medium text-slate-600">Message Body</label>
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-slate-400 mr-0.5">Placeholders:</span>
+                  {['{{clientName}}', '{{reference}}', '{{projectCode}}', '{{senderEmail}}', '{{date}}'].map(
+                    (token) => (
+                      <button
+                        key={token}
+                        type="button"
+                        onClick={() => insertPlaceholderToken(token)}
+                        className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-600 hover:border-blue-300 hover:bg-blue-50 hover:text-[#2463EB]"
+                      >
+                        +{token}
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
               <textarea
                 rows={5}
                 required
@@ -1305,11 +1650,9 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
               <div className="text-[11px] text-slate-500">
-                From:{' '}
-                <span className="font-medium text-slate-700">
-                  {smtpStatus?.configured
-                    ? `${smtpStatus.fromName} <${smtpStatus.fromEmail}>`
-                    : `${senderName} (${senderEmail})`}
+                Sending From:{' '}
+                <span className="font-mono font-medium text-slate-700">
+                  {activeSendingName} &lt;{activeSendingEmail}&gt;
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -1319,6 +1662,14 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                   className="rounded-lg border border-slate-300 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
                 >
                   Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenPreview}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3.5 py-2 text-xs font-semibold text-[#2463EB] hover:bg-blue-100"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Preview
                 </button>
                 {!smtpStatus?.configured && (
                   <button
@@ -1333,8 +1684,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                   href={buildGmailComposeUrl({
                     to: toEmail,
                     cc: ccEmails,
-                    subject,
-                    body,
+                    subject: renderedSubject.rendered,
+                    body: renderedBody.rendered,
                   })}
                   target="_blank"
                   rel="noopener noreferrer"

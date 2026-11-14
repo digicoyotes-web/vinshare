@@ -27,6 +27,7 @@ import { INDUSTRY_TEMPLATES, SERVICE_MASTER } from '../data/seedData';
 import { checkSmtpConnection } from '../services/smtp';
 import {
   buildEmptySmtpMetrics30Days,
+  DEFAULT_SENDING_EMAIL,
   diagnoseSmtpConnection,
   fetchSmtpLogs,
   fetchSmtpStatus,
@@ -80,11 +81,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
   const [smtpHost, setSmtpHost] = useState('smtp.gmail.com');
   const [smtpPort, setSmtpPort] = useState(587);
   const [smtpSecure, setSmtpSecure] = useState(false);
-  const [smtpUser, setSmtpUser] = useState('');
+  const [smtpUser, setSmtpUser] = useState(DEFAULT_SENDING_EMAIL);
   const [smtpPass, setSmtpPass] = useState('');
   const [smtpHasPass, setSmtpHasPass] = useState(false);
   const [smtpFromName, setSmtpFromName] = useState('Vinshar Facility Management ERP');
-  const [smtpFromEmail, setSmtpFromEmail] = useState('');
+  const [smtpFromEmail, setSmtpFromEmail] = useState(DEFAULT_SENDING_EMAIL);
   const [showSmtpPass, setShowSmtpPass] = useState(false);
   const [smtpSaving, setSmtpSaving] = useState(false);
   const [smtpNotice, setSmtpNotice] = useState<string | null>(null);
@@ -92,7 +93,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
   const [smtpActionHint, setSmtpActionHint] = useState<string | null>(null);
   const [smtpDebugClues, setSmtpDebugClues] = useState<string[]>([]);
   const [smtpFailedLogId, setSmtpFailedLogId] = useState<string | null>(null);
-  const [testRecipient, setTestRecipient] = useState('digicoyotes@gmail.com');
+  const [testRecipient, setTestRecipient] = useState(DEFAULT_SENDING_EMAIL);
   const [testingSend, setTestingSend] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [diagnosingSmtp, setDiagnosingSmtp] = useState(false);
@@ -174,10 +175,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
           status.port || (Number.isInteger(vitePort) && vitePort > 0 && vitePort <= 65535 ? vitePort : 587)
         );
         setSmtpSecure(status.secure);
-        setSmtpUser(status.user || viteUser || '');
+        setSmtpUser(status.user || viteUser || DEFAULT_SENDING_EMAIL);
         setSmtpHasPass(status.hasPassword);
         setSmtpFromName(status.fromName || viteFromName || 'Vinshar Facility Management ERP');
-        setSmtpFromEmail(status.fromEmail || status.user || viteFromEmail || viteUser || '');
+        setSmtpFromEmail(
+          status.fromEmail || status.user || viteFromEmail || viteUser || DEFAULT_SENDING_EMAIL
+        );
       })
       .catch((err) => {
         if (viteHost) setSmtpHost(viteHost);
@@ -265,7 +268,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
     const trimmedUser = smtpUser.trim();
     if (!trimmedUser || /^\d+$/.test(trimmedUser) || !trimmedUser.includes('@')) {
       setSmtpError(
-        'Enter your full SMTP email address in "SMTP Username / Email" (e.g. digicoyotes@gmail.com), not a numeric value.'
+        `Enter your full SMTP email address in "SMTP Username / Email" (e.g. ${DEFAULT_SENDING_EMAIL}), not a numeric value.`
       );
       setSmtpActionHint(
         'Use your full Gmail / company mailbox address and a 16-character Google App Password.'
@@ -363,11 +366,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
       setSmtpHost(status.host || 'smtp.gmail.com');
       setSmtpPort(status.port || 587);
       setSmtpSecure(status.secure);
-      setSmtpUser(status.user || '');
+      setSmtpUser(status.user || DEFAULT_SENDING_EMAIL);
       setSmtpHasPass(status.hasPassword);
       setSmtpPass('');
       setSmtpFromName(status.fromName || 'Vinshar Facility Management ERP');
-      setSmtpFromEmail(status.fromEmail || '');
+      setSmtpFromEmail(status.fromEmail || status.user || DEFAULT_SENDING_EMAIL);
       setSmtpNotice('SMTP configuration reset to environment defaults.');
     } catch (err) {
       setSmtpError(err instanceof Error ? err.message : 'Failed to reset SMTP settings.');
@@ -1149,12 +1152,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
                       setSmtpFromEmail(e.target.value);
                     }
                   }}
-                  placeholder="digicoyotes@gmail.com"
+                  placeholder={DEFAULT_SENDING_EMAIL}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
                 />
                 {/^\d+$/.test(smtpUser.trim()) && (
                   <p className="mt-1 text-[10px] text-rose-600">
-                    Replace &quot;{smtpUser.trim()}&quot; with your full email address (e.g. digicoyotes@gmail.com).
+                    Replace &quot;{smtpUser.trim()}&quot; with your full email address (e.g. {DEFAULT_SENDING_EMAIL}).
                   </p>
                 )}
               </div>
@@ -1261,7 +1264,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
                     type="email"
                     value={testRecipient}
                     onChange={(e) => setTestRecipient(e.target.value)}
-                    placeholder="digicoyotes@gmail.com"
+                    placeholder={DEFAULT_SENDING_EMAIL}
                     className="flex-1 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-mono"
                   />
                   <button

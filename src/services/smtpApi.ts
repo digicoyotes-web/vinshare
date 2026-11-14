@@ -123,6 +123,61 @@ export function buildMailtoFallbackHref(params: {
   return `mailto:${encodeURIComponent(params.to.trim())}${query ? `?${query}` : ''}`;
 }
 
+export const DEFAULT_SENDING_EMAIL = 'thedigitalcoyotes@gmail.com';
+
+export interface RenderedEmailTemplateResult {
+  rendered: string;
+  replacedKeys: string[];
+  unresolvedKeys: string[];
+}
+
+export function renderEmailTemplate(
+  template: string,
+  variables: Record<string, string>
+): RenderedEmailTemplateResult {
+  const normalizedMap = new Map<string, string>();
+  for (const [key, value] of Object.entries(variables)) {
+    normalizedMap.set(key.trim().toLowerCase(), value);
+  }
+
+  const replaced = new Set<string>();
+  const unresolved = new Set<string>();
+
+  let out = (template || '').replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (match, key: string) => {
+    const k = key.trim().toLowerCase();
+    if (normalizedMap.has(k)) {
+      replaced.add(key.trim());
+      return normalizedMap.get(k) ?? '';
+    }
+    unresolved.add(key.trim());
+    return match;
+  });
+
+  out = out.replace(/\{([a-zA-Z0-9_.-]+)\}/g, (match, key: string) => {
+    const k = key.trim().toLowerCase();
+    if (normalizedMap.has(k)) {
+      replaced.add(key.trim());
+      return normalizedMap.get(k) ?? '';
+    }
+    return match;
+  });
+
+  out = out.replace(/\[([A-Z0-9_]{3,})\]/g, (match, key: string) => {
+    const k = key.trim().toLowerCase();
+    if (normalizedMap.has(k)) {
+      replaced.add(key.trim());
+      return normalizedMap.get(k) ?? '';
+    }
+    return match;
+  });
+
+  return {
+    rendered: out,
+    replacedKeys: Array.from(replaced),
+    unresolvedKeys: Array.from(unresolved),
+  };
+}
+
 export function buildGmailComposeUrl(params: {
   to: string;
   cc?: string;

@@ -501,7 +501,7 @@ function parseEnvSmtpState(): {
     port,
     parseBoolEnv(secureEntry.value, port === 465)
   ).secure;
-  const user = validUser ? userEntry.value : '';
+  const user = validUser ? userEntry.value : 'thedigitalcoyotes@gmail.com';
   const pass = validPass ? normalizeSmtpPassword(host, passEntry.value) : '';
   const fromName =
     fromNameEntry.value && !/^\d+$/.test(fromNameEntry.value)
@@ -510,7 +510,7 @@ function parseEnvSmtpState(): {
   const fromEmail =
     fromEmailEntry.value && fromEmailEntry.value.includes('@')
       ? fromEmailEntry.value
-      : user;
+      : user || 'thedigitalcoyotes@gmail.com';
 
   return {
     config: {
