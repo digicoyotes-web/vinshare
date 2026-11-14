@@ -1,3 +1,6 @@
+import { classifySmtpErrorToPlainEnglish } from './smtp';
+import { publishSmtpFailureNotification } from './smtpNotifications';
+
 export interface SmtpEnvDiagnostics {
   detectedVars: string[];
   issues: string[];
@@ -105,16 +108,40 @@ export async function fetchSmtpStatus(): Promise<SmtpStatusDto> {
       String(data?.message || data?.error || nonJsonDetail || `Failed to read SMTP status (HTTP ${res.status}).`)
     );
   }
+  if (nonJsonDetail || typeof data?.configured !== 'boolean') {
+    throw new SmtpConnectionError(
+      'Backend SMTP API unavailable: this URL is serving static frontend files without the Node.js Express server.',
+      {
+        status: res.status || 405,
+        smtpErrorCode: 'HTTP_405',
+        smtpCommand: 'HTTP_RPC',
+        smtpRawResponse: nonJsonDetail || 'GET /api/email/smtp-status returned HTML/non-JSON instead of Express JSON.',
+        actionHint:
+          'Open the Development App URL (or run `npm run dev` / `npm start` on port 3000) so `server.ts` handles `/api/email/*` and can open SMTP sockets.',
+        debuggingClues: [
+          'Static preview URLs (such as `ais-pre-...` Shared App URLs) serve static `dist/index.html` without `server.ts`.',
+          'Use the Development App URL (`ais-dev-...`) or local Node server on port 3000 for live SMTP verification and email sending.',
+        ],
+      }
+    );
+  }
   return data as unknown as SmtpStatusDto;
 }
 
 export async function saveAndVerifySmtpConfig(
   input: SmtpConfigInput
 ): Promise<SmtpStatusDto & { verified?: boolean; logEntryId?: string }> {
+  const normalizedPort = Number(input.port) || 587;
+  const normalizedSecure =
+    normalizedPort === 587 ? false : normalizedPort === 465 ? true : Boolean(input.secure);
   const res = await fetch('/api/email/smtp-config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    body: JSON.stringify({
+      ...input,
+      port: normalizedPort,
+      secure: normalizedSecure,
+    }),
   });
   const { data, nonJsonDetail } = await readJsonPayload(res);
   if (!res.ok) {
@@ -199,6 +226,14 @@ export class SmtpConnectionError extends Error {
   smtpRawResponse?: string;
   actionHint?: string;
   debuggingClues?: string[];
+  failureCategory?: string;
+  plainEnglishTitle?: string;
+  plainEnglishExplanation?: string;
+  suggestedFix?: {
+    label: string;
+    port: number;
+    secure: boolean;
+  };
   logEntryId?: string;
 
   constructor(
@@ -211,6 +246,14 @@ export class SmtpConnectionError extends Error {
       smtpRawResponse?: string;
       actionHint?: string;
       debuggingClues?: string[];
+      failureCategory?: string;
+      plainEnglishTitle?: string;
+      plainEnglishExplanation?: string;
+      suggestedFix?: {
+        label: string;
+        port: number;
+        secure: boolean;
+      };
       logEntryId?: string;
     }
   ) {
@@ -223,6 +266,10 @@ export class SmtpConnectionError extends Error {
     this.smtpRawResponse = details.smtpRawResponse;
     this.actionHint = details.actionHint;
     this.debuggingClues = details.debuggingClues;
+    this.failureCategory = details.failureCategory;
+    this.plainEnglishTitle = details.plainEnglishTitle;
+    this.plainEnglishExplanation = details.plainEnglishExplanation;
+    this.suggestedFix = details.suggestedFix;
     this.logEntryId = details.logEntryId;
   }
 }
@@ -432,24 +479,140 @@ export async function sendEmailViaSmtp(
     }))
   );
 
-  const res = await fetch('/api/email/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  let res: Response;
+  try {
+    res = await fetch('/api/email/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: payload.to,
+        cc: payload.cc || '',
+        subject: payload.subject,
+        body: payload.body,
+        replyTo: payload.replyTo || '',
+        attachments: encodedAttachments,
+      }),
+    });
+  } catch (networkErr) {
+    const errMsg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+    const diag = classifySmtpErrorToPlainEnglish({
+      errorCode: 'ECONNECTION',
+      rawResponse: errMsg,
+      fallbackMessage: `Unable to reach the SMTP dispatch server (${errMsg}).`,
+    });
+    publishSmtpFailureNotification({
+      eventType: 'Send Email',
       to: payload.to,
-      cc: payload.cc || '',
       subject: payload.subject,
-      body: payload.body,
-      replyTo: payload.replyTo || '',
-      attachments: encodedAttachments,
-    }),
-  });
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data?.message || data?.error || `SMTP send failed (HTTP ${res.status}).`);
+      failureCategory: diag.failureCategory,
+      plainEnglishTitle: 'Email Dispatch Connection Lost',
+      plainEnglishExplanation: diag.plainEnglishExplanation,
+      actionHint: diag.actionHint,
+      debuggingClues: diag.debuggingClues,
+      smtpErrorCode: 'NETWORK_ERROR',
+    });
+    throw new SmtpConnectionError(diag.plainEnglishExplanation, {
+      status: 0,
+      smtpErrorCode: 'NETWORK_ERROR',
+      smtpRawResponse: errMsg,
+      actionHint: diag.actionHint,
+      debuggingClues: diag.debuggingClues,
+      failureCategory: diag.failureCategory,
+      plainEnglishTitle: 'Email Dispatch Connection Lost',
+      plainEnglishExplanation: diag.plainEnglishExplanation,
+    });
   }
-  return data as SendSmtpEmailResult;
+
+  const { data, nonJsonDetail } = await readJsonPayload(res);
+  if (!res.ok) {
+    const rawCode =
+      typeof data?.smtpErrorCode === 'string'
+        ? data.smtpErrorCode
+        : typeof data?.error === 'string'
+          ? data.error
+          : res.status === 405
+            ? 'HTTP_405'
+            : `HTTP_${res.status}`;
+    const host = typeof data?.smtpHost === 'string' ? data.smtpHost : undefined;
+    const port = typeof data?.smtpPort === 'number' ? data.smtpPort : undefined;
+    const responseCode =
+      typeof data?.smtpResponseCode === 'number' ? data.smtpResponseCode : undefined;
+    const command = typeof data?.smtpCommand === 'string' ? data.smtpCommand : undefined;
+    const rawResponse =
+      typeof data?.smtpRawResponse === 'string' ? data.smtpRawResponse : nonJsonDetail;
+
+    const fallbackDiag = classifySmtpErrorToPlainEnglish({
+      host,
+      port,
+      secure: port === 465,
+      errorCode: rawCode,
+      responseCode,
+      command,
+      rawResponse,
+      fallbackMessage:
+        (typeof data?.message === 'string' && data.message) ||
+        (typeof data?.error === 'string' && data.error) ||
+        nonJsonDetail ||
+        `SMTP email dispatch failed (HTTP ${res.status}).`,
+    });
+
+    const plainEnglishTitle =
+      typeof data?.plainEnglishTitle === 'string'
+        ? data.plainEnglishTitle
+        : fallbackDiag.plainEnglishTitle;
+    const plainEnglishExplanation =
+      typeof data?.plainEnglishExplanation === 'string'
+        ? data.plainEnglishExplanation
+        : fallbackDiag.plainEnglishExplanation;
+    const failureCategory =
+      typeof data?.failureCategory === 'string'
+        ? data.failureCategory
+        : fallbackDiag.failureCategory;
+    const actionHint =
+      typeof data?.actionHint === 'string' ? data.actionHint : fallbackDiag.actionHint;
+    const debuggingClues = Array.isArray(data?.debuggingClues)
+      ? (data.debuggingClues as string[])
+      : fallbackDiag.debuggingClues;
+    const suggestedFix =
+      data?.suggestedFix && typeof data.suggestedFix === 'object'
+        ? (data.suggestedFix as { label: string; port: number; secure: boolean })
+        : fallbackDiag.suggestedFix;
+    const logEntryId =
+      typeof data?.logEntryId === 'string' ? data.logEntryId : undefined;
+
+    publishSmtpFailureNotification({
+      logEntryId,
+      eventType: 'Send Email',
+      to: payload.to,
+      subject: payload.subject,
+      smtpHost: host,
+      smtpPort: port,
+      failureCategory,
+      plainEnglishTitle,
+      plainEnglishExplanation,
+      actionHint,
+      debuggingClues,
+      suggestedFix,
+      smtpErrorCode: rawCode,
+      smtpResponseCode: responseCode,
+    });
+
+    throw new SmtpConnectionError(plainEnglishExplanation, {
+      status: res.status,
+      smtpErrorCode: rawCode,
+      smtpResponseCode: responseCode,
+      smtpCommand: command,
+      smtpRawResponse: rawResponse,
+      actionHint,
+      debuggingClues,
+      failureCategory,
+      plainEnglishTitle,
+      plainEnglishExplanation,
+      suggestedFix,
+      logEntryId,
+    });
+  }
+  return data as unknown as SendSmtpEmailResult;
 }
 
 export interface SmtpActivityLogEntry {

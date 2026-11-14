@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertCircle,
@@ -43,7 +43,21 @@ import {
   saveMasterSettings,
 } from '../utils/erpSettings';
 
-export const SettingsView: React.FC = () => {
+export interface SettingsFocusTarget {
+  tab?: 'config' | 'smtp_logs';
+  logId?: string;
+  runDiagnostic?: boolean;
+  nonce: number;
+}
+
+interface SettingsViewProps {
+  focusTarget?: SettingsFocusTarget | null;
+}
+
+export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
+  const diagnosticCardRef = useRef<HTMLDivElement | null>(null);
+  const lastHandledNonceRef = useRef<number | null>(null);
+  const lastAutoDiagNonceRef = useRef<number | null>(null);
   const initial = loadMasterSettings();
   const [defaultGstPct, setDefaultGstPct] = useState(initial.defaultGstPct);
   const [defaultManagementFeePct, setDefaultManagementFeePct] = useState(
@@ -176,6 +190,26 @@ export const SettingsView: React.FC = () => {
     }
   }, [activeTab, refreshSmtpLogs]);
 
+  useEffect(() => {
+    if (!focusTarget || lastHandledNonceRef.current === focusTarget.nonce) return;
+    lastHandledNonceRef.current = focusTarget.nonce;
+
+    if (focusTarget.tab) {
+      setActiveTab(focusTarget.tab);
+    }
+    if (focusTarget.logId) {
+      setLogStatusFilter('Failed');
+      setExpandedLogIds((prev) => ({ ...prev, [focusTarget.logId!]: true }));
+      void refreshSmtpLogs();
+    }
+    if (focusTarget.runDiagnostic) {
+      setActiveTab('config');
+      window.setTimeout(() => {
+        diagnosticCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    }
+  }, [focusTarget, refreshSmtpLogs]);
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     const saved = saveMasterSettings({
@@ -257,6 +291,9 @@ export const SettingsView: React.FC = () => {
 
   const handleSendTestSmtp = async () => {
     setSmtpError(null);
+    setSmtpActionHint(null);
+    setSmtpDebugClues([]);
+    setSmtpFailedLogId(null);
     setSmtpNotice(null);
     if (!testRecipient.trim()) {
       setSmtpError('Enter a test recipient email address.');
@@ -272,10 +309,19 @@ export const SettingsView: React.FC = () => {
       setSmtpNotice(
         `Test email delivered to ${testRecipient.trim()} via ${res.smtpHost} (Message ID: ${res.messageId}).`
       );
-      refreshSmtpLogs();
+      await refreshSmtpLogs();
     } catch (err) {
-      setSmtpError(err instanceof Error ? err.message : 'Test SMTP send failed.');
-      refreshSmtpLogs();
+      const msg = err instanceof Error ? err.message : 'Test SMTP send failed.';
+      setSmtpError(msg);
+      if (err instanceof SmtpConnectionError) {
+        setSmtpActionHint(err.actionHint || null);
+        setSmtpDebugClues(err.debuggingClues || []);
+        if (err.logEntryId) {
+          setSmtpFailedLogId(err.logEntryId);
+          setExpandedLogIds((prev) => ({ ...prev, [err.logEntryId!]: true }));
+        }
+      }
+      await refreshSmtpLogs();
     } finally {
       setTestingSend(false);
     }
@@ -353,7 +399,7 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const handleRunSmtpDiagnostic = async () => {
+  const handleRunSmtpDiagnostic = useCallback(async () => {
     setDiagnosingSmtp(true);
     setShowDiagnosticTrace(false);
     try {
@@ -377,7 +423,14 @@ export const SettingsView: React.FC = () => {
     } finally {
       setDiagnosingSmtp(false);
     }
-  };
+  }, [smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, refreshSmtpLogs]);
+
+  useEffect(() => {
+    if (focusTarget?.runDiagnostic && focusTarget.nonce !== lastAutoDiagNonceRef.current) {
+      lastAutoDiagNonceRef.current = focusTarget.nonce;
+      void handleRunSmtpDiagnostic();
+    }
+  }, [focusTarget, handleRunSmtpDiagnostic]);
 
   const toggleLogTrace = (id: string) => {
     setExpandedLogIds((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -1174,7 +1227,10 @@ export const SettingsView: React.FC = () => {
           </form>
 
           {/* SMTP Diagnostic Tool */}
-          <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
+          <div
+            ref={diagnosticCardRef}
+            className="rounded-xl border border-slate-200 bg-white p-5 space-y-4"
+          >
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <Stethoscope className="h-4 w-4 text-[#2463EB]" />

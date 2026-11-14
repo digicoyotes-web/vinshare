@@ -13,7 +13,9 @@ import nodemailer from 'nodemailer';
 import { createServer as createViteServer } from 'vite';
 import {
   buildSmtpDebuggingClues,
+  buildSmtpTransportSecurityOptions,
   checkSmtpConnection,
+  classifySmtpErrorToPlainEnglish,
 } from './src/services/smtp.ts';
 
 dotenv.config({ path: '.env.local' });
@@ -493,7 +495,11 @@ function parseEnvSmtpState(): {
 
   const host = validHost ? rawHost : 'smtp.gmail.com';
   const port = validPort ? parsedPortNum : 587;
-  const secure = parseBoolEnv(secureEntry.value, port === 465);
+  const secure = buildSmtpTransportSecurityOptions(
+    host,
+    port,
+    parseBoolEnv(secureEntry.value, port === 465)
+  ).secure;
   const user = validUser ? userEntry.value : '';
   const pass = validPass ? normalizeSmtpPassword(host, passEntry.value) : '';
   const fromName =
@@ -613,24 +619,70 @@ interface SmtpActivityRecord {
   smtpRawResponse?: string;
   actionHint?: string;
   debuggingClues?: string[];
+  failureCategory?: string;
+  plainEnglishTitle?: string;
+  plainEnglishExplanation?: string;
+  suggestedFix?: { label: string; port: number; secure: boolean };
   handshakeTrace?: string[];
   attachmentCount: number;
   timestamp: string;
 }
 
 const smtpActivityLog: SmtpActivityRecord[] = [];
+const smtpEventClients = new Set<express.Response>();
+
+function broadcastSmtpFailureEvent(record: SmtpActivityRecord) {
+  if (smtpEventClients.size === 0) return;
+  const payload = `event: smtp_failure\ndata: ${JSON.stringify(record)}\n\n`;
+  for (const client of smtpEventClients) {
+    try {
+      client.write(payload);
+    } catch {
+      smtpEventClients.delete(client);
+    }
+  }
+}
 
 function pushSmtpActivityLog(
   entry: Omit<SmtpActivityRecord, 'id' | 'timestamp'>
 ): SmtpActivityRecord {
+  let enriched = entry;
+  if (entry.status === 'Failed' && (!entry.plainEnglishTitle || !entry.plainEnglishExplanation)) {
+    const diag = classifySmtpErrorToPlainEnglish({
+      host: entry.smtpHost,
+      port: entry.smtpPort,
+      secure: entry.smtpPort === 465,
+      errorCode: entry.smtpErrorCode,
+      responseCode: entry.smtpResponseCode,
+      command: entry.smtpCommand,
+      rawResponse: entry.smtpRawResponse || entry.errorMessage,
+      fallbackMessage: entry.errorMessage,
+    });
+    enriched = {
+      ...entry,
+      failureCategory: entry.failureCategory || diag.failureCategory,
+      plainEnglishTitle: entry.plainEnglishTitle || diag.plainEnglishTitle,
+      plainEnglishExplanation: entry.plainEnglishExplanation || diag.plainEnglishExplanation,
+      actionHint: entry.actionHint || diag.actionHint,
+      debuggingClues:
+        entry.debuggingClues && entry.debuggingClues.length > 0
+          ? entry.debuggingClues
+          : diag.debuggingClues,
+      suggestedFix: entry.suggestedFix || diag.suggestedFix,
+    };
+  }
+
   const record: SmtpActivityRecord = {
     id: generateId('SMTP'),
     timestamp: new Date().toISOString(),
-    ...entry,
+    ...enriched,
   };
   smtpActivityLog.unshift(record);
   if (smtpActivityLog.length > 2000) {
     smtpActivityLog.length = 2000;
+  }
+  if (record.status === 'Failed') {
+    broadcastSmtpFailureEvent(record);
   }
   return record;
 }
@@ -817,10 +869,15 @@ function createTraceableSmtpTransporter(cfg: SmtpRuntimeConfig) {
     },
   };
 
+  const security = buildSmtpTransportSecurityOptions(cfg.host, cfg.port, cfg.secure);
   const transporter = nodemailer.createTransport({
     host: cfg.host,
     port: cfg.port,
-    secure: cfg.secure,
+    secure: security.secure,
+    requireTLS: security.requireTLS,
+    ignoreTLS: security.ignoreTLS,
+    opportunisticTLS: security.opportunisticTLS,
+    tls: security.tls,
     auth: {
       user: cfg.user,
       pass: cfg.pass,
@@ -1349,6 +1406,7 @@ async function probeTlsSocketHandshake(
         host,
         port,
         servername: host,
+        minVersion: 'TLSv1.2',
         rejectUnauthorized: true,
       });
       let settled = false;
@@ -1486,6 +1544,7 @@ async function probeTlsSocketHandshake(
             const tlsSocket = tls.connect({
               socket,
               servername: host,
+              minVersion: 'TLSv1.2',
               rejectUnauthorized: true,
             });
             tlsSocket.once('secureConnect', () => {
@@ -2464,8 +2523,11 @@ async function startServer() {
     const body = req.body ?? {};
     const host = String(body.host ?? runtimeSmtpConfig.host).trim();
     const port = Number(body.port ?? runtimeSmtpConfig.port) || 587;
-    const secure =
-      typeof body.secure === 'boolean' ? body.secure : port === 465;
+    const secure = buildSmtpTransportSecurityOptions(
+      host,
+      port,
+      typeof body.secure === 'boolean' ? body.secure : port === 465
+    ).secure;
     const user = String(body.user ?? runtimeSmtpConfig.user).trim();
     const incomingPass = typeof body.pass === 'string' ? body.pass : '';
     const rawPass = incomingPass ? incomingPass : runtimeSmtpConfig.pass;
@@ -2607,8 +2669,11 @@ async function startServer() {
     const body = req.body ?? {};
     const host = String(body.host ?? runtimeSmtpConfig.host).trim();
     const port = Number(body.port ?? runtimeSmtpConfig.port) || 587;
-    const secure =
-      typeof body.secure === 'boolean' ? body.secure : port === 465;
+    const secure = buildSmtpTransportSecurityOptions(
+      host,
+      port,
+      typeof body.secure === 'boolean' ? body.secure : port === 465
+    ).secure;
     const user = String(body.user ?? runtimeSmtpConfig.user).trim();
     const incomingPass = typeof body.pass === 'string' ? body.pass : '';
     const pass = incomingPass ? incomingPass : runtimeSmtpConfig.pass;
@@ -2709,6 +2774,29 @@ async function startServer() {
     });
   });
 
+  app.get('/api/email/smtp-events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+    res.write(': connected\n\n');
+
+    smtpEventClients.add(res);
+    const keepAlive = setInterval(() => {
+      try {
+        res.write(': keepalive\n\n');
+      } catch {
+        clearInterval(keepAlive);
+        smtpEventClients.delete(res);
+      }
+    }, 25000);
+
+    req.on('close', () => {
+      clearInterval(keepAlive);
+      smtpEventClients.delete(res);
+    });
+  });
+
   app.get('/api/email/smtp-logs', (_req, res) => {
     res.json({
       logs: smtpActivityLog.slice(0, 20),
@@ -2726,27 +2814,45 @@ async function startServer() {
     const rawAttachments: unknown[] = Array.isArray(body.attachments) ? body.attachments : [];
 
     if (!isSmtpConfigured(runtimeSmtpConfig)) {
-      if (to && subject) {
-        pushSmtpActivityLog({
-          eventType: 'Send Email',
-          to,
-          cc: cc || undefined,
-          from: runtimeSmtpConfig.fromEmail || runtimeSmtpConfig.user || 'Unconfigured',
-          subject,
-          status: 'Failed',
-          smtpHost: runtimeSmtpConfig.host || undefined,
-          smtpPort: runtimeSmtpConfig.port || undefined,
-          errorMessage: 'SMTP mail server is not configured yet.',
-          smtpErrorCode: 'SMTP_NOT_CONFIGURED',
-          smtpCommand: 'PREFLIGHT',
-          smtpRawResponse: 'Missing valid SMTP_HOST, SMTP_USER, or SMTP_PASS credentials.',
-          attachmentCount: rawAttachments.length,
-        });
-      }
+      const diag = classifySmtpErrorToPlainEnglish({
+        host: runtimeSmtpConfig.host,
+        port: runtimeSmtpConfig.port,
+        secure: runtimeSmtpConfig.secure,
+        errorCode: 'SMTP_NOT_CONFIGURED',
+      });
+      const logged = pushSmtpActivityLog({
+        eventType: 'Send Email',
+        to: to || 'Pending Recipient',
+        cc: cc || undefined,
+        from: runtimeSmtpConfig.fromEmail || runtimeSmtpConfig.user || 'Unconfigured',
+        subject: subject || 'Outbound Email Dispatch',
+        status: 'Failed',
+        smtpHost: runtimeSmtpConfig.host || undefined,
+        smtpPort: runtimeSmtpConfig.port || undefined,
+        errorMessage: diag.plainEnglishExplanation,
+        smtpErrorCode: 'SMTP_NOT_CONFIGURED',
+        smtpCommand: 'PREFLIGHT',
+        smtpRawResponse: 'Missing valid SMTP_HOST, SMTP_USER, or SMTP_PASS credentials.',
+        actionHint: diag.actionHint,
+        debuggingClues: diag.debuggingClues,
+        failureCategory: diag.failureCategory,
+        plainEnglishTitle: diag.plainEnglishTitle,
+        plainEnglishExplanation: diag.plainEnglishExplanation,
+        attachmentCount: rawAttachments.length,
+      });
       return res.status(400).json({
         error: 'SMTP_NOT_CONFIGURED',
-        message:
-          'SMTP mail server is not configured yet. Configure your SMTP Host, Username, and App Password before sending.',
+        message: diag.plainEnglishExplanation,
+        smtpErrorCode: 'SMTP_NOT_CONFIGURED',
+        smtpCommand: 'PREFLIGHT',
+        smtpHost: runtimeSmtpConfig.host,
+        smtpPort: runtimeSmtpConfig.port,
+        failureCategory: diag.failureCategory,
+        plainEnglishTitle: diag.plainEnglishTitle,
+        plainEnglishExplanation: diag.plainEnglishExplanation,
+        actionHint: diag.actionHint,
+        debuggingClues: diag.debuggingClues,
+        logEntryId: logged.id,
       });
     }
 
@@ -2821,7 +2927,17 @@ async function startServer() {
         runtimeSmtpConfig.port,
         getTrace()
       );
-      pushSmtpActivityLog({
+      const diag = classifySmtpErrorToPlainEnglish({
+        host: runtimeSmtpConfig.host,
+        port: runtimeSmtpConfig.port,
+        secure: runtimeSmtpConfig.secure,
+        errorCode: failure.smtpErrorCode,
+        responseCode: failure.smtpResponseCode,
+        command: failure.smtpCommand,
+        rawResponse: failure.smtpRawResponse,
+        fallbackMessage: failure.message,
+      });
+      const logged = pushSmtpActivityLog({
         eventType: 'Send Email',
         to,
         cc: cc || undefined,
@@ -2830,24 +2946,36 @@ async function startServer() {
         status: 'Failed',
         smtpHost: runtimeSmtpConfig.host,
         smtpPort: runtimeSmtpConfig.port,
-        errorMessage: failure.message,
+        errorMessage: diag.plainEnglishExplanation,
         smtpErrorCode: failure.smtpErrorCode,
         smtpResponseCode: failure.smtpResponseCode,
         smtpCommand: failure.smtpCommand,
         smtpRawResponse: failure.smtpRawResponse,
-        actionHint: failure.actionHint,
-        debuggingClues: failure.debuggingClues,
+        actionHint: diag.actionHint,
+        debuggingClues: diag.debuggingClues,
+        failureCategory: diag.failureCategory,
+        plainEnglishTitle: diag.plainEnglishTitle,
+        plainEnglishExplanation: diag.plainEnglishExplanation,
+        suggestedFix: diag.suggestedFix,
         handshakeTrace: failure.handshakeTrace,
         attachmentCount: attachments.length,
       });
       return res.status(422).json({
         error: 'SMTP_SEND_FAILED',
-        message: failure.message,
+        message: diag.plainEnglishExplanation,
+        smtpHost: runtimeSmtpConfig.host,
+        smtpPort: runtimeSmtpConfig.port,
         smtpErrorCode: failure.smtpErrorCode,
         smtpResponseCode: failure.smtpResponseCode,
         smtpCommand: failure.smtpCommand,
-        actionHint: failure.actionHint,
-        debuggingClues: failure.debuggingClues,
+        smtpRawResponse: failure.smtpRawResponse,
+        failureCategory: diag.failureCategory,
+        plainEnglishTitle: diag.plainEnglishTitle,
+        plainEnglishExplanation: diag.plainEnglishExplanation,
+        actionHint: diag.actionHint,
+        debuggingClues: diag.debuggingClues,
+        suggestedFix: diag.suggestedFix,
+        logEntryId: logged.id,
       });
     }
   });

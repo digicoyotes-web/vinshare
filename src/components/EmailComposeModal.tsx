@@ -24,6 +24,7 @@ import {
   fetchSmtpStatus,
   saveAndVerifySmtpConfig,
   sendEmailViaSmtp,
+  SmtpConnectionError,
   type SmtpAttachmentInput,
   type SmtpStatusDto,
 } from '../services/smtpApi';
@@ -116,6 +117,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const [verifyingBeforeReview, setVerifyingBeforeReview] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorHint, setErrorHint] = useState<string | null>(null);
+  const [errorClues, setErrorClues] = useState<string[]>([]);
   const [sentResult, setSentResult] = useState<{
     channel: 'smtp' | 'erp_log';
     messageId?: string;
@@ -134,6 +137,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     setConfirmStep(false);
     setIsSending(false);
     setErrorMsg(null);
+    setErrorHint(null);
+    setErrorClues([]);
     setSmtpSaveNotice(null);
     setFsOpen(false);
     setFsQuery('');
@@ -165,9 +170,14 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
         setSmtpFromEmail(status.fromEmail || status.user || '');
         setSmtpConfigOpen(!status.configured);
       })
-      .catch(() => {
+      .catch((err) => {
         if (!cancelled) {
           setSmtpConfigOpen(true);
+          if (err instanceof SmtpConnectionError) {
+            setErrorMsg(err.message);
+            setErrorHint(err.actionHint || null);
+            setErrorClues(err.debuggingClues || []);
+          }
         }
       })
       .finally(() => {
@@ -271,6 +281,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
 
   const handleSaveVerifySmtp = async () => {
     setErrorMsg(null);
+    setErrorHint(null);
+    setErrorClues([]);
     setSmtpSaveNotice(null);
     setSmtpSaving(true);
     try {
@@ -292,6 +304,10 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'SMTP verification failed.');
+      if (err instanceof SmtpConnectionError) {
+        setErrorHint(err.actionHint || null);
+        setErrorClues(err.debuggingClues || []);
+      }
     } finally {
       setSmtpSaving(false);
     }
@@ -340,6 +356,8 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       }
 
       setVerifyingBeforeReview(true);
+      setErrorHint(null);
+      setErrorClues([]);
       try {
         const updated = await saveAndVerifySmtpConfig({
           host: smtpHost.trim(),
@@ -363,6 +381,10 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
         setErrorMsg(
           err instanceof Error ? err.message : 'SMTP verification failed.'
         );
+        if (err instanceof SmtpConnectionError) {
+          setErrorHint(err.actionHint || null);
+          setErrorClues(err.debuggingClues || []);
+        }
       } finally {
         setVerifyingBeforeReview(false);
       }
@@ -424,6 +446,13 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       setErrorMsg(
         err instanceof Error ? err.message : 'SMTP delivery failed. Check your SMTP configuration.'
       );
+      if (err instanceof SmtpConnectionError) {
+        setErrorHint(err.actionHint || null);
+        setErrorClues(err.debuggingClues || []);
+      } else {
+        setErrorHint(null);
+        setErrorClues([]);
+      }
       setConfirmStep(false);
     } finally {
       setIsSending(false);
@@ -616,7 +645,15 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
             {errorMsg && (
               <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>{errorMsg}</span>
+                <div className="space-y-1">
+                  <div className="font-medium">{errorMsg}</div>
+                  {errorHint && (
+                    <div className="text-[11px] text-rose-900">
+                      <span className="font-semibold">Fix: </span>
+                      {errorHint}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
@@ -867,7 +904,22 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
             {errorMsg && (
               <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>{errorMsg}</span>
+                <div className="space-y-1">
+                  <div className="font-medium">{errorMsg}</div>
+                  {errorHint && (
+                    <div className="text-[11px] text-rose-900">
+                      <span className="font-semibold">Actionable Fix: </span>
+                      {errorHint}
+                    </div>
+                  )}
+                  {errorClues.length > 0 && (
+                    <ul className="list-disc pl-4 space-y-0.5 text-[11px] text-rose-900/90">
+                      {errorClues.map((clue) => (
+                        <li key={clue}>{clue}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
             )}
 

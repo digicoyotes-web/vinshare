@@ -53,6 +53,72 @@ function isValidPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
+export interface SmtpTransportSecurityOptions {
+  secure: boolean;
+  requireTLS: boolean;
+  ignoreTLS: boolean;
+  opportunisticTLS: boolean;
+  tls: {
+    minVersion: 'TLSv1.2';
+    servername: string;
+    rejectUnauthorized: boolean;
+  };
+  modeLabel: 'STARTTLS (Port 587 Enforced)' | 'SSL/TLS (Implicit)' | 'STARTTLS (Explicit)';
+}
+
+/**
+ * Resolves Nodemailer TLS/STARTTLS transport options in accordance with modern
+ * Gmail and commercial SMTP security requirements:
+ * - Port 587: always uses explicit STARTTLS (`secure: false`, `requireTLS: true`)
+ *   and enforces TLS 1.2+ with SNI (`servername`) so credentials are never sent unencrypted.
+ * - Port 465: uses implicit SSL/TLS (`secure: true`) with TLS 1.2+ and SNI.
+ */
+export function buildSmtpTransportSecurityOptions(
+  host: string,
+  port: number,
+  secureInput?: boolean
+): SmtpTransportSecurityOptions {
+  const cleanHost = (host || '').trim();
+  const normalizedPort = Number(port) || 587;
+  const tls = {
+    minVersion: 'TLSv1.2' as const,
+    servername: cleanHost,
+    rejectUnauthorized: true,
+  };
+
+  if (normalizedPort === 587) {
+    return {
+      secure: false,
+      requireTLS: true,
+      ignoreTLS: false,
+      opportunisticTLS: false,
+      tls,
+      modeLabel: 'STARTTLS (Port 587 Enforced)',
+    };
+  }
+
+  if (normalizedPort === 465) {
+    return {
+      secure: true,
+      requireTLS: false,
+      ignoreTLS: false,
+      opportunisticTLS: false,
+      tls,
+      modeLabel: 'SSL/TLS (Implicit)',
+    };
+  }
+
+  const useImplicitSsl = typeof secureInput === 'boolean' ? secureInput : false;
+  return {
+    secure: useImplicitSsl,
+    requireTLS: !useImplicitSsl && normalizedPort !== 25,
+    ignoreTLS: false,
+    opportunisticTLS: false,
+    tls,
+    modeLabel: useImplicitSsl ? 'SSL/TLS (Implicit)' : 'STARTTLS (Explicit)',
+  };
+}
+
 export function normalizeSmtpPass(host: string, pass: string): string {
   const trimmed = (pass || '').trim();
   if (!trimmed) return '';
@@ -176,13 +242,188 @@ export function buildSmtpDebuggingClues(params: {
   return { message, actionHint, debuggingClues: clues };
 }
 
+export interface SmtpPlainEnglishDiagnosis {
+  failureCategory: string;
+  plainEnglishTitle: string;
+  plainEnglishExplanation: string;
+  actionHint: string;
+  debuggingClues: string[];
+  suggestedFix?: {
+    label: string;
+    port: number;
+    secure: boolean;
+  };
+}
+
+export function classifySmtpErrorToPlainEnglish(params: {
+  host?: string;
+  port?: number;
+  secure?: boolean;
+  errorCode?: string;
+  responseCode?: number;
+  command?: string;
+  rawResponse?: string;
+  fallbackMessage?: string;
+}): SmtpPlainEnglishDiagnosis {
+  const host = (params.host || 'SMTP server').trim();
+  const port = Number(params.port) || 587;
+  const secure = typeof params.secure === 'boolean' ? params.secure : port === 465;
+  const { errorCode, responseCode, command, rawResponse = '', fallbackMessage } = params;
+  const lowerHost = host.toLowerCase();
+  const lowerRaw = rawResponse.toLowerCase();
+
+  if (errorCode === 'SMTP_NOT_CONFIGURED') {
+    return {
+      failureCategory: 'SMTP Not Configured',
+      plainEnglishTitle: 'SMTP Not Configured Yet',
+      plainEnglishExplanation:
+        'Outbound SMTP credentials are not saved yet. Configure your SMTP Host, Username, and Password / App Password in Settings before sending.',
+      actionHint:
+        'Open Settings -> Outbound SMTP Mail Server (or click SMTP Settings inside the email modal) and verify your credentials.',
+      debuggingClues: ['Missing active SMTP Host, Username, or App Password on the server.'],
+    };
+  }
+
+  if (errorCode === 'HTTP_405') {
+    return {
+      failureCategory: 'Static Preview (HTTP 405)',
+      plainEnglishTitle: 'Static Preview Detected (HTTP 405)',
+      plainEnglishExplanation:
+        'This preview URL serves static files without the Express/Node.js backend (`server.ts`), so email dispatch API requests are rejected.',
+      actionHint:
+        'Switch to the Development App URL or run `npm run dev` on port 3000 to send real SMTP emails.',
+      debuggingClues: ['POST /api/email/send returned HTTP 405 Method Not Allowed from static host.'],
+    };
+  }
+
+  const base = buildSmtpDebuggingClues({
+    host,
+    port,
+    secure,
+    errorCode,
+    responseCode,
+    command,
+    rawResponse,
+  });
+
+  if (
+    responseCode === 535 ||
+    errorCode === 'EAUTH' ||
+    lowerRaw.includes('535-5.7.8') ||
+    lowerRaw.includes('username and password not accepted') ||
+    lowerRaw.includes('authentication failed')
+  ) {
+    return {
+      failureCategory: 'Wrong Password',
+      plainEnglishTitle: lowerHost.includes('gmail')
+        ? 'Wrong Password (or Gmail App Password Required)'
+        : 'Wrong Username or Password',
+      plainEnglishExplanation: lowerHost.includes('gmail')
+        ? `Gmail connected over ${secure ? 'SSL/TLS' : 'STARTTLS'}, but rejected your login (SMTP 535). Gmail blocks standard login passwords — use a 16-character Google App Password.`
+        : `Connected to ${host}:${port}, but your SMTP username or password was rejected (SMTP ${responseCode || '535'}).`,
+      actionHint: base.actionHint,
+      debuggingClues: base.debuggingClues,
+    };
+  }
+
+  if (responseCode === 534 || responseCode === 530 || lowerRaw.includes('must issue a starttls')) {
+    return {
+      failureCategory: 'Encryption Required',
+      plainEnglishTitle: 'Encryption / STARTTLS Required',
+      plainEnglishExplanation: `${host}:${port} requires TLS encryption before accepting login credentials.`,
+      actionHint: base.actionHint,
+      debuggingClues: base.debuggingClues,
+      suggestedFix: {
+        label: 'Switch to Port 587 (STARTTLS)',
+        port: 587,
+        secure: false,
+      },
+    };
+  }
+
+  if (
+    errorCode === 'ESOCKET' ||
+    errorCode === 'ERR_SSL_WRONG_VERSION_NUMBER' ||
+    lowerRaw.includes('wrong version number') ||
+    lowerRaw.includes('ssl routines') ||
+    lowerRaw.includes('packet length too long')
+  ) {
+    const suggestedFix = secure
+      ? {
+          label: port === 465 ? 'Switch Port 465 to 587 (STARTTLS)' : `Switch Port ${port} to STARTTLS`,
+          port: port === 465 ? 587 : port,
+          secure: false,
+        }
+      : {
+          label: port === 587 ? 'Switch Port 587 to 465 (SSL/TLS)' : `Switch Port ${port} to SSL/TLS`,
+          port: port === 587 ? 465 : port,
+          secure: true,
+        };
+    return {
+      failureCategory: 'SSL Protocol Mismatch',
+      plainEnglishTitle: 'SSL Protocol Mismatch',
+      plainEnglishExplanation: `Encryption mode (${secure ? 'SSL/TLS' : 'STARTTLS'}) does not match port ${port} on ${host}. Pair Port 587 with STARTTLS or Port 465 with SSL/TLS.`,
+      actionHint: base.actionHint,
+      debuggingClues: base.debuggingClues,
+      suggestedFix,
+    };
+  }
+
+  if (
+    errorCode === 'ETIMEDOUT' ||
+    errorCode === 'ECONNREFUSED' ||
+    lowerRaw.includes('timed out') ||
+    lowerRaw.includes('timeout')
+  ) {
+    const isTimeout = errorCode === 'ETIMEDOUT' || lowerRaw.includes('timed out');
+    const suggestedFix =
+      port === 587
+        ? { label: 'Try Port 465 (SSL/TLS)', port: 465, secure: true }
+        : { label: 'Try Port 587 (STARTTLS)', port: 587, secure: false };
+    return {
+      failureCategory: 'Port Blocked',
+      plainEnglishTitle: isTimeout ? 'Port Blocked (Firewall Timeout)' : 'Port Blocked / Connection Refused',
+      plainEnglishExplanation: isTimeout
+        ? `TCP port ${port} on ${host} did not respond in time. Outbound traffic on port ${port} may be blocked by a firewall or cloud policy.`
+        : `${host} actively refused connection on TCP port ${port}. Confirm the port number (587 STARTTLS or 465 SSL/TLS).`,
+      actionHint: base.actionHint,
+      debuggingClues: base.debuggingClues,
+      suggestedFix,
+    };
+  }
+
+  if (
+    errorCode === 'ENOTFOUND' ||
+    errorCode === 'EDNS' ||
+    errorCode === 'EAI_AGAIN' ||
+    lowerRaw.includes('enotfound')
+  ) {
+    return {
+      failureCategory: 'Host Not Found',
+      plainEnglishTitle: 'Host Not Found (DNS Error)',
+      plainEnglishExplanation: `Could not resolve SMTP hostname "${host}" via DNS. Check for typos or extra spaces in the host setting.`,
+      actionHint: base.actionHint,
+      debuggingClues: base.debuggingClues,
+    };
+  }
+
+  return {
+    failureCategory: 'Handshake Failed',
+    plainEnglishTitle: 'Email Dispatch Failed',
+    plainEnglishExplanation: fallbackMessage || base.message,
+    actionHint: base.actionHint,
+    debuggingClues: base.debuggingClues,
+  };
+}
+
 async function runNodeVerifyWithNodemailer(
   cfg: SmtpConnectionConfig,
   deps: SmtpCheckDeps
 ): Promise<SmtpHandshakeCheckResult> {
   const host = (cfg.host || '').trim();
   const port = Number(cfg.port) || 587;
-  const secure = typeof cfg.secure === 'boolean' ? cfg.secure : port === 465;
+  const security = buildSmtpTransportSecurityOptions(host, port, cfg.secure);
+  const secure = security.secure;
   const user = (cfg.user || '').trim();
   const pass = normalizeSmtpPass(host, cfg.pass || '');
   const timeoutMs = cfg.timeoutMs ?? 15000;
@@ -326,7 +567,11 @@ async function runNodeVerifyWithNodemailer(
   const transporter = createTransportFn({
     host,
     port,
-    secure,
+    secure: security.secure,
+    requireTLS: security.requireTLS,
+    ignoreTLS: security.ignoreTLS,
+    opportunisticTLS: security.opportunisticTLS,
+    tls: security.tls,
     auth: { user, pass },
     connectionTimeout: timeoutMs,
     greetingTimeout: timeoutMs,
@@ -344,14 +589,17 @@ async function runNodeVerifyWithNodemailer(
       port,
       secure,
       latencyMs,
-      message: `Nodemailer verify() succeeded for ${host}:${port} (${latencyMs} ms). Ready to send as ${user}.`,
+      message: `Nodemailer verify() succeeded for ${host}:${port} via ${security.modeLabel} (${latencyMs} ms). Ready to send as ${user}.`,
       debuggingClues: [
-        `TCP + ${secure ? 'SSL/TLS' : 'STARTTLS'} handshake and AUTH login verified for ${user}.`,
+        `TCP + ${security.modeLabel} handshake (TLSv1.2+, SNI=${host}) and AUTH login verified for ${user}.`,
       ],
       handshakeTrace:
         trace.length > 0
           ? trace
-          : [`Connected to ${host}:${port}`, `250 Authentication succeeded (${latencyMs} ms)`],
+          : [
+              `Connected to ${host}:${port} (${security.modeLabel}, requireTLS=${String(security.requireTLS)})`,
+              `250 Authentication succeeded (${latencyMs} ms)`,
+            ],
     };
   } catch (err) {
     const latencyMs = Date.now() - startedAt;
@@ -435,7 +683,7 @@ export async function checkSmtpConnection(
   const fetchFn = deps.fetchImpl ?? fetch;
   const host = (config.host || '').trim();
   const port = Number(config.port) || 587;
-  const secure = typeof config.secure === 'boolean' ? config.secure : port === 465;
+  const secure = buildSmtpTransportSecurityOptions(host, port, config.secure).secure;
 
   let res: Response;
   try {
