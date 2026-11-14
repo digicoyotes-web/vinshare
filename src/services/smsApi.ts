@@ -14,6 +14,7 @@ export interface SendSmsPayload {
   requiresVerification?: boolean;
   customMessage?: string;
   ttlMinutes?: number;
+  maxAttempts?: number;
 }
 
 export interface SendSmsResponse {
@@ -115,18 +116,20 @@ function buildSmsBody(
   purpose: string,
   entityLabel: string,
   otpCode?: string,
-  customMessage?: string
+  customMessage?: string,
+  ttlMinutes = 5
 ): string {
+  const validMins = Math.min(30, Math.max(1, Math.round(ttlMinutes) || 5));
   if (customMessage && customMessage.trim()) {
     return otpCode
-      ? `${customMessage.trim()} Verification OTP: ${otpCode}. Valid for 5 mins.`
+      ? `${customMessage.trim()} Verification OTP: ${otpCode}. Valid for ${validMins} mins.`
       : customMessage.trim();
   }
   switch (purpose) {
     case 'client_mobile_verification':
-      return `Facility Management ERP: Your mobile verification code for ${entityLabel} is ${otpCode}. Reply "VERIFY ${otpCode}" or enter this code in the ERP. Valid for 5 mins.`;
+      return `Facility Management ERP: Your mobile verification code for ${entityLabel} is ${otpCode}. Reply "VERIFY ${otpCode}" or enter this code in the ERP. Valid for ${validMins} mins.`;
     case 'login_mfa':
-      return `Facility Management ERP Security: Your MFA sign-in OTP for ${entityLabel} is ${otpCode}. Do not share this code. Valid for 5 mins.`;
+      return `Facility Management ERP Security: Your MFA sign-in OTP for ${entityLabel} is ${otpCode}. Do not share this code. Valid for ${validMins} mins.`;
     case 'proposal_approval':
       return `Facility Management ERP: Commercial approval OTP for ${entityLabel} is ${otpCode}. Verify to authorize submission/margin exception.`;
     case 'loi_acceptance':
@@ -134,7 +137,7 @@ function buildSmsBody(
     case 'agreement_signature':
       return `Facility Management ERP Legal: Execution signature OTP for ${entityLabel} is ${otpCode}. Enter code to digitally lock executed contract.`;
     case 'invoice_approval':
-      return `Facility Management ERP Finance: Authorization OTP to issue ${entityLabel} is ${otpCode}. Valid for 5 mins.`;
+      return `Facility Management ERP Finance: Authorization OTP to issue ${entityLabel} is ${otpCode}. Valid for ${validMins} mins.`;
     case 'payment_confirmation':
       return `Facility Management ERP: Payment receipt confirmation for ${entityLabel}. Verification code: ${otpCode}.`;
     case 'project_activation':
@@ -389,17 +392,19 @@ export async function sendSms(payload: SendSmsPayload): Promise<SendSmsResponse>
     }
   }
 
+  const ttlMinutes = Math.min(30, Math.max(1, Math.round(Number(payload.ttlMinutes) || 5)));
+  const maxAttempts = Math.min(10, Math.max(1, Math.round(Number(payload.maxAttempts) || 5)));
   const requiresVerification = payload.requiresVerification !== false;
   const otp = requiresVerification ? randomOtp6() : undefined;
   const salt = otp ? randomHex(16) : undefined;
   const hash = otp && salt ? await sha256Hex(`${salt}:${otp}`) : undefined;
-  const body = buildSmsBody(payload.purpose, payload.entityLabel || normalized, otp, payload.customMessage);
+  const body = buildSmsBody(payload.purpose, payload.entityLabel || normalized, otp, payload.customMessage, ttlMinutes);
 
   const now = new Date();
   const deliveredAt = new Date(now.getTime() + 120).toISOString();
   const receivedAt = new Date(now.getTime() + 250).toISOString();
   const expiresAt = requiresVerification
-    ? new Date(now.getTime() + Math.max(1, Number(payload.ttlMinutes) || 5) * 60 * 1000).toISOString()
+    ? new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString()
     : null;
 
   const record: LocalSmsRecord = {
@@ -419,7 +424,7 @@ export async function sendSms(payload: SendSmsPayload): Promise<SendSmsResponse>
     verificationStatus: requiresVerification ? 'pending' : 'not_required',
     requiresVerification,
     attempts: 0,
-    maxAttempts: 5,
+    maxAttempts,
     expiresAt,
     createdAt: now.toISOString(),
     deliveredAt,

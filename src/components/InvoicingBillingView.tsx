@@ -6,6 +6,7 @@ import type {
   InvoiceRecord,
   ProjectRecord,
 } from '../types/erp';
+import { loadMasterSettings } from '../utils/erpSettings';
 import { formatInrFull } from '../utils/formatters';
 import { downloadDocumentPdf } from '../utils/pdfGenerator';
 import { DocumentActionBar } from './DocumentActionBar';
@@ -42,8 +43,13 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
 
   const [newProjectId, setNewProjectId] = useState(projects[0]?.id || '');
-  const [billingPeriod, setBillingPeriod] = useState('Feb 2025');
-  const [poNumber, setPoNumber] = useState('PO/USQ/2025/004');
+  const [billingPeriod, setBillingPeriod] = useState(() =>
+    new Date().toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })
+  );
+  const [poNumber, setPoNumber] = useState('PO/VIS/2026/004');
+  const [dueDate, setDueDate] = useState(() =>
+    new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+  );
   const [placeOfSupply, setPlaceOfSupply] = useState<'Intra-State' | 'Inter-State'>('Intra-State');
   const [extraAmount, setExtraAmount] = useState('0');
   const [deductions, setDeductions] = useState('0');
@@ -52,17 +58,26 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
 
   const handleGenerateInvoice = (e: React.FormEvent) => {
     e.preventDefault();
+    const settings = loadMasterSettings();
+    const gstPct = settings.defaultGstPct;
     const project = projects.find((p) => p.id === newProjectId) || projects[0];
+    if (!project) return;
     const client = clients.find((c) => c.id === project.clientId);
     const baseAmt = Math.round(project.monthlyBilling);
     const extra = Number(extraAmount) || 0;
     const ded = Number(deductions) || 0;
     const taxableValue = Math.max(0, baseAmt + extra - ded);
-    const cgst = placeOfSupply === 'Intra-State' ? Math.round(taxableValue * 0.09) : 0;
-    const sgst = placeOfSupply === 'Intra-State' ? Math.round(taxableValue * 0.09) : 0;
-    const igst = placeOfSupply === 'Inter-State' ? Math.round(taxableValue * 0.18) : 0;
+    const halfRate = gstPct / 2 / 100;
+    const fullRate = gstPct / 100;
+    const cgst = placeOfSupply === 'Intra-State' ? Math.round(taxableValue * halfRate) : 0;
+    const sgst = placeOfSupply === 'Intra-State' ? Math.round(taxableValue * halfRate) : 0;
+    const igst = placeOfSupply === 'Inter-State' ? Math.round(taxableValue * fullRate) : 0;
     const totalAmount = taxableValue + cgst + sgst + igst;
-    const nextNum = `INV-${String(1461 + invoices.length).padStart(5, '0')}`;
+    const maxInvSeq = invoices.reduce((max, inv) => {
+      const m = inv.invoiceNumber.match(/(\d+)$/);
+      return Math.max(max, m ? Number(m[1]) : 0);
+    }, 1460);
+    const nextNum = `INV-${String(maxInvSeq + 1).padStart(5, '0')}`;
 
     const invoice: InvoiceRecord = {
       id: nextNum,
@@ -75,7 +90,7 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
       billingPeriod,
       poNumber,
       issueDate: new Date().toISOString().slice(0, 10),
-      dueDate: '2025-02-28',
+      dueDate: dueDate || new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
       lineItems: [
         {
           id: `LI-${Date.now()}`,
@@ -175,6 +190,11 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
           const activeProject = projects.find((p) => p.id === active.projectId);
           const activeSnapshots = invoiceSnapshots.filter((s) => s.entityId === active.id);
           const invoicePdfName = `${active.invoiceNumber}.pdf`;
+          const effectiveIgstRate =
+            active.taxableValue > 0
+              ? Math.round(((active.cgst + active.sgst + active.igst) / active.taxableValue) * 1000) / 10
+              : 18;
+          const halfGstLabel = Math.round((effectiveIgstRate / 2) * 10) / 10;
 
           const handleSaveInvoice = () => {
             onUpdateInvoice({ ...active });
@@ -212,10 +232,10 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
                 ['Taxable Value', formatInrFull(active.taxableValue)],
                 ...(active.placeOfSupply === 'Intra-State'
                   ? [
-                      ['CGST (9%)', formatInrFull(active.cgst)] as [string, string],
-                      ['SGST (9%)', formatInrFull(active.sgst)] as [string, string],
+                      [`CGST (${halfGstLabel}%)`, formatInrFull(active.cgst)] as [string, string],
+                      [`SGST (${halfGstLabel}%)`, formatInrFull(active.sgst)] as [string, string],
                     ]
-                  : [['IGST (18%)', formatInrFull(active.igst)] as [string, string]]),
+                  : [[`IGST (${effectiveIgstRate}%)`, formatInrFull(active.igst)] as [string, string]]),
                 ['Invoice Total', formatInrFull(active.totalAmount)],
               ],
               footerNote: `Project: ${activeProject?.code || active.projectId} · Status: ${active.status}`,
@@ -334,17 +354,17 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
               {active.placeOfSupply === 'Intra-State' ? (
                 <>
                   <div className="flex justify-between">
-                    <span className="text-slate-600">CGST (9%)</span>
+                    <span className="text-slate-600">CGST ({halfGstLabel}%)</span>
                     <span className="font-mono tabular-nums">{formatInrFull(active.cgst)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-600">SGST (9%)</span>
+                    <span className="text-slate-600">SGST ({halfGstLabel}%)</span>
                     <span className="font-mono tabular-nums">{formatInrFull(active.sgst)}</span>
                   </div>
                 </>
               ) : (
                 <div className="flex justify-between">
-                  <span className="text-slate-600">IGST (18%)</span>
+                  <span className="text-slate-600">IGST ({effectiveIgstRate}%)</span>
                   <span className="font-mono tabular-nums">{formatInrFull(active.igst)}</span>
                 </div>
               )}
@@ -425,14 +445,25 @@ export const InvoicingBillingView: React.FC<InvoicingBillingViewProps> = ({
                   </select>
                 </div>
               </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Client PO Number</label>
-                <input
-                  type="text"
-                  value={poNumber}
-                  onChange={(e) => setPoNumber(e.target.value)}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Client PO Number</label>
+                  <input
+                    type="text"
+                    value={poNumber}
+                    onChange={(e) => setPoNumber(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Due Date</label>
+                  <input
+                    type="date"
+                    value={dueDate}
+                    onChange={(e) => setDueDate(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
+                  />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

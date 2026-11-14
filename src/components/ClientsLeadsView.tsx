@@ -94,9 +94,14 @@ export const ClientsLeadsView: React.FC<ClientsLeadsViewProps> = ({
       createdAt: new Date().toISOString().slice(0, 10),
     };
 
+    const year = new Date().getFullYear();
+    const maxOppSeq = opportunities.reduce((max, o) => {
+      const m = o.id.match(/(\d+)$/);
+      return Math.max(max, m ? Number(m[1]) : 0);
+    }, 10);
     const newOpp: OpportunityRecord | undefined = oppTitle.trim()
       ? {
-          id: `OPP-2025-${String(opportunities.length + 1).padStart(2, '0')}`,
+          id: `OPP-${year}-${String(maxOppSeq + 1).padStart(2, '0')}`,
           clientId: id,
           title: oppTitle.trim(),
           siteName: siteAddress.trim() || `${companyName.trim()} Site`,
@@ -105,8 +110,8 @@ export const ClientsLeadsView: React.FC<ClientsLeadsViewProps> = ({
           stage: 'Proposal',
           estimatedAnnualValue: Number(oppValue) || 6500000,
           owner: 'Neha Verma',
-          enquiryRef: `RFP/${id}/2025`,
-          expectedStartDate: '2025-03-01',
+          enquiryRef: `RFP/${id}/${year}`,
+          expectedStartDate: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
         }
       : undefined;
 

@@ -69,18 +69,20 @@ function buildSmsBody(
   purpose: string,
   entityLabel: string,
   otpCode?: string,
-  customMessage?: string
+  customMessage?: string,
+  ttlMinutes = 5
 ): string {
+  const validMins = Math.min(30, Math.max(1, Math.round(ttlMinutes) || 5));
   if (customMessage && customMessage.trim()) {
     return otpCode
-      ? `${customMessage.trim()} Verification OTP: ${otpCode}. Valid for 5 mins.`
+      ? `${customMessage.trim()} Verification OTP: ${otpCode}. Valid for ${validMins} mins.`
       : customMessage.trim();
   }
   switch (purpose) {
     case 'client_mobile_verification':
-      return `Facility Management ERP: Your mobile verification code for ${entityLabel} is ${otpCode}. Reply "VERIFY ${otpCode}" or enter this code in the ERP. Valid for 5 mins.`;
+      return `Facility Management ERP: Your mobile verification code for ${entityLabel} is ${otpCode}. Reply "VERIFY ${otpCode}" or enter this code in the ERP. Valid for ${validMins} mins.`;
     case 'login_mfa':
-      return `Facility Management ERP Security: Your MFA sign-in OTP for ${entityLabel} is ${otpCode}. Do not share this code. Valid for 5 mins.`;
+      return `Facility Management ERP Security: Your MFA sign-in OTP for ${entityLabel} is ${otpCode}. Do not share this code. Valid for ${validMins} mins.`;
     case 'proposal_approval':
       return `Facility Management ERP: Commercial approval OTP for ${entityLabel} is ${otpCode}. Verify to authorize submission/margin exception.`;
     case 'loi_acceptance':
@@ -88,7 +90,7 @@ function buildSmsBody(
     case 'agreement_signature':
       return `Facility Management ERP Legal: Execution signature OTP for ${entityLabel} is ${otpCode}. Enter code to digitally lock executed contract.`;
     case 'invoice_approval':
-      return `Facility Management ERP Finance: Authorization OTP to issue ${entityLabel} is ${otpCode}. Valid for 5 mins.`;
+      return `Facility Management ERP Finance: Authorization OTP to issue ${entityLabel} is ${otpCode}. Valid for ${validMins} mins.`;
     case 'payment_confirmation':
       return `Facility Management ERP: Payment receipt confirmation for ${entityLabel}. Verification code: ${otpCode}.`;
     case 'project_activation':
@@ -335,7 +337,11 @@ async function startServer() {
       requiresVerification = true,
       customMessage = '',
       ttlMinutes = 5,
+      maxAttempts = 5,
     } = req.body ?? {};
+
+    const clampedTtl = Math.min(30, Math.max(1, Math.round(Number(ttlMinutes) || 5)));
+    const clampedAttempts = Math.min(10, Math.max(1, Math.round(Number(maxAttempts) || 5)));
 
     const normalized = normalizePhone(String(phone || ''));
     if (!normalized || normalized.length < 10) {
@@ -355,13 +361,13 @@ async function startServer() {
     const otpCode = requiresVerification ? String(crypto.randomInt(100000, 999999)) : undefined;
     const salt = otpCode ? crypto.randomBytes(16).toString('hex') : undefined;
     const otpHash = otpCode && salt ? hashOtp(otpCode, salt) : undefined;
-    const body = buildSmsBody(purpose, entityLabel || normalized, otpCode, customMessage);
+    const body = buildSmsBody(purpose, entityLabel || normalized, otpCode, customMessage, clampedTtl);
 
     const now = new Date();
     const deliveredAt = new Date(now.getTime() + 120).toISOString();
     const receivedAt = new Date(now.getTime() + 250).toISOString();
     const expiresAt = requiresVerification
-      ? new Date(now.getTime() + Math.max(1, Number(ttlMinutes) || 5) * 60 * 1000).toISOString()
+      ? new Date(now.getTime() + clampedTtl * 60 * 1000).toISOString()
       : null;
 
     const record: SmsRecord = {
@@ -381,7 +387,7 @@ async function startServer() {
       verificationStatus: requiresVerification ? 'pending' : 'not_required',
       requiresVerification: Boolean(requiresVerification),
       attempts: 0,
-      maxAttempts: 5,
+      maxAttempts: clampedAttempts,
       expiresAt,
       createdAt: now.toISOString(),
       deliveredAt,

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
   Download,
@@ -20,9 +20,11 @@ import type {
   ClientRecord,
   CostSheetLineItem,
   IndustryCategory,
+  OpportunityRecord,
   ProposalRecord,
   ProposalVersion,
 } from '../types/erp';
+import { loadMasterSettings } from '../utils/erpSettings';
 import { calculateCostSheetFinancials, downloadCsv, formatInrFull } from '../utils/formatters';
 import { downloadDocumentPdf } from '../utils/pdfGenerator';
 import { DocumentActionBar } from './DocumentActionBar';
@@ -32,7 +34,10 @@ import { VersionsModal } from './VersionsModal';
 
 interface ProposalsCostSheetViewProps {
   clients: ClientRecord[];
+  opportunities: OpportunityRecord[];
   proposals: ProposalRecord[];
+  focusClientId?: string;
+  onClearFocusClient?: () => void;
   onSaveProposalVersion: (proposalId: string, updated: ProposalVersion) => void;
   onSelectProposalVersion: (proposalId: string, version: string) => void;
   onCreateProposalSnapshot: (proposalId: string, note: string) => void;
@@ -44,7 +49,10 @@ interface ProposalsCostSheetViewProps {
 
 export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
   clients,
+  opportunities,
   proposals,
+  focusClientId,
+  onClearFocusClient,
   onSaveProposalVersion,
   onSelectProposalVersion,
   onCreateProposalSnapshot,
@@ -53,23 +61,57 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
   onOpenEmailCompose,
   onGenerateLoiFromProposal,
 }) => {
+  const settings = loadMasterSettings();
   const [selectedId, setSelectedId] = useState<string>(proposals[0]?.id || '');
   const [showPreview, setShowPreview] = useState(false);
   const [showNewWizard, setShowNewWizard] = useState(false);
   const [showVersionsModal, setShowVersionsModal] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [focusedClientNotice, setFocusedClientNotice] = useState<ClientRecord | null>(null);
 
   // New proposal wizard state
   const [wizClientId, setWizClientId] = useState(clients[0]?.id || '');
-  const [wizIndustry, setWizIndustry] = useState<IndustryCategory>('Commercial');
-  const [wizSiteName, setWizSiteName] = useState('');
+  const [wizIndustry, setWizIndustry] = useState<IndustryCategory>(clients[0]?.industry || 'Commercial');
+  const [wizSiteName, setWizSiteName] = useState(clients[0]?.siteAddress || '');
   const [wizDuration, setWizDuration] = useState(12);
+  const [wizServiceChargePct, setWizServiceChargePct] = useState<number>(
+    settings.defaultManagementFeePct
+  );
   const [wizServices, setWizServices] = useState<string[]>([
     'Housekeeping',
     'Security',
     'Technical Maintenance',
   ]);
   const [customService, setCustomService] = useState('');
+
+  const openWizardForClient = (clientId?: string) => {
+    const master = loadMasterSettings();
+    const targetClient =
+      (clientId ? clients.find((c) => c.id === clientId) : undefined) || clients[0];
+    if (targetClient) {
+      const tmpl = INDUSTRY_TEMPLATES.find((t) => t.category === targetClient.industry);
+      setWizClientId(targetClient.id);
+      setWizIndustry(targetClient.industry);
+      setWizSiteName(targetClient.siteAddress);
+      if (tmpl) setWizServices(tmpl.defaultServices);
+    }
+    setWizServiceChargePct(master.defaultManagementFeePct);
+    setShowNewWizard(true);
+  };
+
+  useEffect(() => {
+    if (!focusClientId) return;
+    const targetClient = clients.find((c) => c.id === focusClientId) || null;
+    const existing = proposals.find((p) => p.clientId === focusClientId);
+    if (existing) {
+      setSelectedId(existing.id);
+      setFocusedClientNotice(targetClient);
+    } else {
+      setFocusedClientNotice(null);
+      openWizardForClient(focusClientId);
+    }
+    onClearFocusClient?.();
+  }, [focusClientId, proposals, clients, onClearFocusClient]);
 
   const activeProposal = useMemo(
     () => proposals.find((p) => p.id === selectedId) || proposals[0],
@@ -112,6 +154,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
 
   const addLineItem = (category: CostSheetLineItem['category']) => {
     if (!activeProposal || !activeVersion || isLocked) return;
+    const master = loadMasterSettings();
     const newItem: CostSheetLineItem = {
       id: `CS-${Date.now().toString(36).toUpperCase()}`,
       category,
@@ -120,7 +163,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
       shiftOrUnit: category === 'Manpower' ? '8 Hrs Shift' : 'Monthly Lot',
       quantity: 1,
       unitRate: 18500,
-      statutoryPct: category === 'Manpower' ? 21.6 : 0,
+      statutoryPct: category === 'Manpower' ? master.statutoryPfEsicPct : 0,
     };
     const nextItems = [...activeVersion.lineItems, newItem];
     const fin = calculateCostSheetFinancials(
@@ -196,45 +239,58 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
 
   const handleCreateProposalSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const master = loadMasterSettings();
     const client = clients.find((c) => c.id === wizClientId) || clients[0];
-    const template = INDUSTRY_TEMPLATES.find((t) => t.category === wizIndustry)!;
-    const lineItems: CostSheetLineItem[] = wizServices.map((srv, idx) => {
-      const master = SERVICE_MASTER.find((s) => s.name === srv);
+    if (!client) return;
+    const linkedOpp = opportunities.find((o) => o.clientId === client.id);
+    const chosenServices = wizServices.length > 0 ? wizServices : ['Housekeeping'];
+    const lineItems: CostSheetLineItem[] = chosenServices.map((srv, idx) => {
+      const sMaster = SERVICE_MASTER.find((s) => s.name === srv);
       return {
-        id: `NEW-${idx + 1}`,
+        id: `NEW-${Date.now().toString(36).toUpperCase()}-${idx + 1}`,
         category: 'Manpower',
         service: srv,
         designationOrItem: `${srv} Executive / Staff`,
-        shiftOrUnit: master?.unit || 'Monthly',
+        shiftOrUnit: sMaster?.unit || 'Monthly',
         quantity: 6,
-        unitRate: master?.defaultRate || 19000,
-        statutoryPct: 21.6,
+        unitRate: sMaster?.defaultRate || 19000,
+        statutoryPct: master.statutoryPfEsicPct,
       };
     });
-    const fin = calculateCostSheetFinancials(lineItems, 'margin', template.defaultMarginPct, 0, wizDuration);
-    const id = `PROP-2025-${String(proposals.length + 20).padStart(3, '0')}`;
+    const feePct = Number.isFinite(wizServiceChargePct)
+      ? wizServiceChargePct
+      : master.defaultManagementFeePct;
+    const fin = calculateCostSheetFinancials(lineItems, 'margin', feePct, 0, wizDuration);
+    const year = new Date().getFullYear();
+    const maxPropSeq = proposals.reduce((max, p) => {
+      const m = p.id.match(/(\d+)$/);
+      return Math.max(max, m ? Number(m[1]) : 0);
+    }, 20);
+    const seqStr = String(maxPropSeq + 1).padStart(3, '0');
+    const id = `PROP-${year}-${seqStr}`;
     const todayLabel = new Date().toLocaleDateString('en-IN', {
       day: '2-digit',
       month: 'short',
       year: 'numeric',
     });
-    const usesHousekeepingTerms = wizServices.includes('Housekeeping') && wizServices.length <= 3;
+    const validityDate = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    const usesHousekeepingTerms = chosenServices.includes('Housekeeping') && chosenServices.length <= 3;
     const newProposal: ProposalRecord = {
       id,
-      reference: `VIS/PROP/2026/${String(proposals.length + 20).padStart(3, '0')}`,
-      opportunityId: 'OPP-NEW',
+      reference: `VIS/PROP/${year}/${seqStr}`,
+      opportunityId: linkedOpp?.id || 'OPP-NEW',
       clientId: client.id,
       industry: wizIndustry,
       siteName: wizSiteName.trim() || client.siteAddress,
-      selectedServices: wizServices,
+      selectedServices: chosenServices,
       contractDurationMonths: wizDuration,
-      validityDate: '2026-12-31',
+      validityDate,
       currentVersion: 'V1',
       proposalDate: todayLabel,
-      subject: `Proposal for providing ${wizServices.join(', ')} services at ${wizSiteName.trim() || client.siteAddress}.`,
+      subject: `Proposal for providing ${chosenServices.join(', ')} services at ${wizSiteName.trim() || client.siteAddress}.`,
       introLetter: VINSHAR_PROPOSAL_INTRO,
       termsAndConditions: usesHousekeepingTerms ? VINSHAR_HOUSEKEEPING_TERMS : VINSHAR_PROPERTY_MGMT_TERMS,
-      gstNote: 'GST will be charged extra @18%.',
+      gstNote: `GST will be charged extra @${master.defaultGstPct}%.`,
       versions: [
         {
           version: 'V1',
@@ -243,9 +299,9 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
           reason: `Generated from ${wizIndustry} industry template`,
           clientFeedback: '',
           pricingMode: 'margin',
-          serviceChargePct: template.defaultMarginPct,
+          serviceChargePct: feePct,
           discountPct: 0,
-          gstPct: 18,
+          gstPct: master.defaultGstPct,
           lineItems,
           ...fin,
           status: 'Draft',
@@ -254,6 +310,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
     };
     onCreateProposal(newProposal);
     setSelectedId(id);
+    setFocusedClientNotice(null);
     setShowNewWizard(false);
     setWizSiteName('');
   };
@@ -352,7 +409,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => setShowNewWizard(true)}
+            onClick={() => openWizardForClient(activeProposal.clientId)}
             className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-700"
           >
             <Plus className="h-4 w-4" />
@@ -360,6 +417,33 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
           </button>
         </div>
       </div>
+
+      {focusedClientNotice && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/70 px-4 py-3 text-xs text-[#14263D]">
+          <span>
+            Loaded existing proposal for <strong>{focusedClientNotice.companyName}</strong> ({focusedClientNotice.industry}).
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                openWizardForClient(focusedClientNotice.id);
+                setFocusedClientNotice(null);
+              }}
+              className="rounded-md bg-[#2463EB] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-blue-700"
+            >
+              + Create New Proposal for {focusedClientNotice.companyName}
+            </button>
+            <button
+              type="button"
+              onClick={() => setFocusedClientNotice(null)}
+              className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Proposal Selector Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
@@ -845,6 +929,12 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
                 </span>
               </div>
             </div>
+
+            {activeVersion.grossMarginPct < settings.minMarginThreshold && (
+              <div className="rounded-lg border border-amber-200 bg-[#FFF2E5] px-3 py-2 text-[11px] text-amber-900">
+                Margin ({activeVersion.grossMarginPct}%) is below the configured Director Approval threshold ({settings.minMarginThreshold}%). Director SMS OTP approval required.
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -865,7 +955,17 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
                   <label className="block text-xs font-medium text-slate-700 mb-1">Client</label>
                   <select
                     value={wizClientId}
-                    onChange={(e) => setWizClientId(e.target.value)}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      setWizClientId(nextId);
+                      const cl = clients.find((c) => c.id === nextId);
+                      if (cl) {
+                        setWizIndustry(cl.industry);
+                        setWizSiteName(cl.siteAddress);
+                        const tmpl = INDUSTRY_TEMPLATES.find((t) => t.category === cl.industry);
+                        if (tmpl) setWizServices(tmpl.defaultServices);
+                      }
+                    }}
                     className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
                   >
                     {clients.map((c) => (
@@ -895,7 +995,7 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
                   </select>
                 </div>
               </div>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-4 gap-3">
                 <div className="col-span-2">
                   <label className="block text-xs font-medium text-slate-700 mb-1">Project / Site Name</label>
                   <input
@@ -907,13 +1007,25 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Duration (Months)</label>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Duration (Mos)</label>
                   <input
                     type="number"
                     min={1}
                     max={60}
                     value={wizDuration}
                     onChange={(e) => setWizDuration(Number(e.target.value) || 12)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Mgmt Fee / Margin %</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min={0}
+                    max={50}
+                    value={wizServiceChargePct}
+                    onChange={(e) => setWizServiceChargePct(Number(e.target.value) || 0)}
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono"
                   />
                 </div>

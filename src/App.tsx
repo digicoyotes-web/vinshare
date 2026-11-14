@@ -170,6 +170,7 @@ const NAV_ITEMS: Array<{ id: NavModuleId; label: string; icon: React.FC<{ classN
 export default function App() {
   const [activeNav, setActiveNav] = useState<NavModuleId>('dashboard');
   const [focusProjectId, setFocusProjectId] = useState<string | undefined>(undefined);
+  const [focusClientId, setFocusClientId] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -1124,14 +1125,20 @@ export default function App() {
               opportunities={opportunities}
               onAddClient={handleAddClient}
               onTriggerSmsVerify={setSmsVerifyContext}
-              onCreateProposalForClient={() => setActiveNav('proposals')}
+              onCreateProposalForClient={(clientId) => {
+                setFocusClientId(clientId);
+                setActiveNav('proposals');
+              }}
             />
           )}
 
           {activeNav === 'proposals' && (
             <ProposalsCostSheetView
               clients={clients}
+              opportunities={opportunities}
               proposals={proposals}
+              focusClientId={focusClientId}
+              onClearFocusClient={() => setFocusClientId(undefined)}
               onSaveProposalVersion={handleSaveProposalVersion}
               onSelectProposalVersion={handleSelectProposalVersion}
               onCreateProposalSnapshot={handleCreateProposalSnapshot}
@@ -1230,6 +1237,7 @@ export default function App() {
 
           {activeNav === 'payments' && (
             <PaymentsCollectionsView
+              clients={clients}
               invoices={invoices}
               payments={payments}
               onRecordPayment={handleRecordPayment}

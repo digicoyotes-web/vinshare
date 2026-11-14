@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react';
 import { sendSms, verifySmsOtp } from '../services/smsApi';
+import { loadMasterSettings } from '../utils/erpSettings';
 import { formatDateTime } from '../utils/formatters';
 
 export interface SmsVerifyModalContext {
@@ -88,6 +89,7 @@ export const SmsVerifyModal: React.FC<SmsVerifyModalProps> = ({
     setDispatching(true);
     setError(null);
     try {
+      const settings = loadMasterSettings();
       const res = await sendSms({
         phone: phoneInput,
         recipientName: context.recipientName,
@@ -96,7 +98,8 @@ export const SmsVerifyModal: React.FC<SmsVerifyModalProps> = ({
         entityId: context.entityId,
         entityLabel: context.entityLabel,
         requiresVerification: true,
-        ttlMinutes: 5,
+        ttlMinutes: settings.otpExpiryMinutes,
+        maxAttempts: settings.maxOtpAttempts,
       });
       setMessageId(res.id);
       setChallengeToken(res.challengeToken);
