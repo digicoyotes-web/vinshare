@@ -7,6 +7,8 @@ import {
   ChevronDown,
   ChevronUp,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   Folder,
   FolderOpen,
@@ -110,6 +112,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const [smtpPass, setSmtpPass] = useState('');
   const [smtpFromName, setSmtpFromName] = useState('Vinshar Facility Management ERP');
   const [smtpFromEmail, setSmtpFromEmail] = useState('');
+  const [showSmtpPass, setShowSmtpPass] = useState(false);
   const [smtpSaving, setSmtpSaving] = useState(false);
   const [smtpSaveNotice, setSmtpSaveNotice] = useState<string | null>(null);
 
@@ -284,16 +287,35 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     setErrorHint(null);
     setErrorClues([]);
     setSmtpSaveNotice(null);
+
+    const trimmedUser = smtpUser.trim();
+    if (!trimmedUser || /^\d+$/.test(trimmedUser) || !trimmedUser.includes('@')) {
+      setErrorMsg(
+        'Enter your full SMTP email address in "SMTP Username / Email" (e.g. digicoyotes@gmail.com), not a numeric value like 1234567890.'
+      );
+      setErrorHint(
+        'Use your full Gmail address (e.g. digicoyotes@gmail.com) and a 16-character Google App Password.'
+      );
+      return;
+    }
+    if (!smtpPass.trim() && !smtpStatus?.hasPassword) {
+      setErrorMsg('Enter your 16-character SMTP Password / Google App Password.');
+      setErrorHint(
+        'For Gmail, turn on 2-Step Verification and generate an App Password at myaccount.google.com/apppasswords.'
+      );
+      return;
+    }
+
     setSmtpSaving(true);
     try {
       const updated = await saveAndVerifySmtpConfig({
         host: smtpHost.trim(),
         port: Number(smtpPort) || 587,
         secure: smtpSecure,
-        user: smtpUser.trim(),
+        user: trimmedUser,
         pass: smtpPass || undefined,
         fromName: smtpFromName.trim() || 'Vinshar Facility Management ERP',
-        fromEmail: (smtpFromEmail || smtpUser).trim(),
+        fromEmail: (smtpFromEmail || trimmedUser).trim(),
         verify: true,
       });
       setSmtpStatus(updated);
@@ -823,7 +845,10 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                         SMTP Username / Email
                       </label>
                       <input
-                        type="text"
+                        type="email"
+                        name="smtp_username_email"
+                        autoComplete="off"
+                        data-lpignore="true"
                         value={smtpUser}
                         onChange={(e) => {
                           setSmtpUser(e.target.value);
@@ -831,23 +856,41 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                             setSmtpFromEmail(e.target.value);
                           }
                         }}
-                        placeholder="your-email@gmail.com"
+                        placeholder="digicoyotes@gmail.com"
                         className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
                       />
+                      {/^\d+$/.test(smtpUser.trim()) && (
+                        <p className="mt-1 text-[10px] text-rose-600">
+                          Replace &quot;{smtpUser.trim()}&quot; with your full email address (e.g. digicoyotes@gmail.com).
+                        </p>
+                      )}
                     </div>
                     <div className="sm:col-span-6">
                       <label className="block text-[10px] font-medium text-slate-600 mb-1">
                         SMTP Password / App Password
                       </label>
-                      <input
-                        type="password"
-                        value={smtpPass}
-                        onChange={(e) => setSmtpPass(e.target.value)}
-                        placeholder={
-                          smtpStatus?.hasPassword ? '•••••••• (saved on server)' : '16-char App Password'
-                        }
-                        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
-                      />
+                      <div className="relative">
+                        <input
+                          type={showSmtpPass ? 'text' : 'password'}
+                          name="smtp_app_password"
+                          autoComplete="new-password"
+                          data-lpignore="true"
+                          value={smtpPass}
+                          onChange={(e) => setSmtpPass(e.target.value)}
+                          placeholder={
+                            smtpStatus?.hasPassword ? '•••••••• (saved on server)' : '16-char Google App Password'
+                          }
+                          className="w-full rounded-md border border-slate-300 pl-2.5 pr-8 py-1.5 text-xs font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowSmtpPass((v) => !v)}
+                          title={showSmtpPass ? 'Hide password' : 'Show password'}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                        >
+                          {showSmtpPass ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                        </button>
+                      </div>
                     </div>
                     <div className="sm:col-span-6">
                       <label className="block text-[10px] font-medium text-slate-600 mb-1">
