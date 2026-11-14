@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  ArrowUpRight,
   Briefcase,
   Building2,
   Calendar,
@@ -11,7 +12,6 @@ import {
   IndianRupee,
   Receipt,
   ShieldCheck,
-  TrendingUp,
   Users,
   Wallet,
 } from 'lucide-react';
@@ -26,7 +26,7 @@ import type {
   ProposalRecord,
   SmsVerificationStats,
 } from '../types/erp';
-import { formatInrCompact } from '../utils/formatters';
+import { formatInrCompact, formatInrFull } from '../utils/formatters';
 import { DashboardQrWidget } from './DashboardQrWidget';
 
 interface DashboardViewProps {
@@ -56,215 +56,338 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenProjectSite,
   onOpenSmsInbox,
 }) => {
-  const [periodFilter, setPeriodFilter] = useState<'month' | 'quarter' | 'fy'>('month');
-  const [chartGranularity, setChartGranularity] = useState<'monthly' | 'quarterly'>('monthly');
-  const [hoveredMonth, setHoveredMonth] = useState<string | null>(null);
+  const [periodFilter, setPeriodFilter] = useState<'all' | 'fy26' | 'fy25'>('all');
+  const [chartGranularity, setChartGranularity] = useState<'monthly' | 'quarterly' | 'live'>('monthly');
+  const [hoveredBarKey, setHoveredBarKey] = useState<string | null>(null);
 
-  // Reconcile live KPI values from ERP source records + baseline historical portfolio
+  // Reconcile 100% live KPIs from ERP state (zero inflated placeholder offsets)
   const metrics = useMemo(() => {
-    const baseClientOffset = 122; // + 6 seeded = 128 matching portfolio scale
-    const totalClients = baseClientOffset + clients.length;
+    const verifiedClients = clients.filter((c) => c.mobileVerified).length;
+    const activatedProjects = projects.filter((p) => p.closingStatus === 'Project Activated').length;
+    const totalManpower = projects.reduce((sum, p) => sum + p.approvedManpower, 0);
 
-    const baseProjectOffset = 40; // + 2 seeded = 42
-    const totalProjects = baseProjectOffset + projects.length;
+    const activeProposals = proposals.filter((p) => {
+      const cur = p.versions.find((v) => v.version === p.currentVersion);
+      return cur && cur.status !== 'Rejected' && cur.status !== 'Superseded';
+    });
+    const approvedProposals = proposals.filter((p) => {
+      const cur = p.versions.find((v) => v.version === p.currentVersion);
+      return cur?.status === 'Approved';
+    }).length;
 
-    const activeProposalsCount =
-      16 +
-      proposals.filter((p) => {
-        const cur = p.versions.find((v) => v.version === p.currentVersion);
-        return cur && cur.status !== 'Rejected' && cur.status !== 'Superseded';
-      }).length;
+    const pendingLois = lois.filter((l) => l.status !== 'Accepted' && l.status !== 'Rejected').length;
+    const executedAgreements = agreements.filter((a) => a.status === 'Executed').length;
 
-    const pendingLoisCount =
-      6 + lois.filter((l) => l.status !== 'Accepted' && l.status !== 'Rejected').length;
+    const contractPortfolioValue =
+      agreements.reduce((sum, a) => sum + a.annualValue, 0) +
+      projects
+        .filter((p) => !agreements.some((a) => a.id === p.agreementId))
+        .reduce((sum, p) => sum + p.annualValue, 0);
 
-    const signedAgreementsCount =
-      34 + agreements.filter((a) => a.status === 'Executed').length;
-
-    const activeContractValue =
-      102450000 +
-      agreements.reduce((sum, a) => sum + (a.status === 'Executed' ? a.annualValue : 0), 0) +
-      projects.reduce((sum, p) => sum + (p.closingStatus === 'Project Activated' ? p.annualValue * 0.2 : 0), 0);
-
-    const liveInvoiced = invoices.reduce((sum, i) => sum + i.totalAmount, 0);
-    const livePaid = invoices.reduce((sum, i) => sum + i.paidAmount, 0);
-    const invoicedThisMonth = 22926133 + liveInvoiced; // ~2.86 Cr
-    const receivedThisMonth = 20280833 + livePaid; // ~2.31 Cr
-    const outstandingAmount = Math.max(0, invoicedThisMonth - receivedThisMonth);
+    const invoicedTotal = invoices.reduce((sum, i) => sum + i.totalAmount, 0);
+    const receivedTotal = invoices.reduce((sum, i) => sum + i.paidAmount, 0);
+    const tdsTotal = invoices.reduce((sum, i) => sum + i.tdsAmount, 0);
+    const outstandingTotal = Math.max(0, invoicedTotal - receivedTotal - tdsTotal);
+    const collectionRatio =
+      invoicedTotal > 0 ? Math.round(((receivedTotal + tdsTotal) / invoicedTotal) * 100) : 0;
 
     return {
-      totalClients,
-      totalProjects,
-      activeProposalsCount,
-      pendingLoisCount,
-      signedAgreementsCount,
-      activeContractValue,
-      invoicedThisMonth,
-      receivedThisMonth,
-      outstandingAmount,
+      totalClients: clients.length,
+      verifiedClients,
+      totalProjects: projects.length,
+      activatedProjects,
+      totalManpower,
+      activeProposalsCount: activeProposals.length,
+      approvedProposals,
+      pendingLoisCount: pendingLois,
+      totalLoisCount: lois.length,
+      totalAgreementsCount: agreements.length,
+      executedAgreements,
+      contractPortfolioValue,
+      invoicedTotal,
+      receivedTotal,
+      tdsTotal,
+      outstandingTotal,
+      collectionRatio,
     };
   }, [clients, proposals, lois, agreements, projects, invoices]);
 
-  const pipelineSegments = [
-    { label: 'Proposal', count: 6 + proposals.length, color: '#2463EB' },
-    { label: 'LOI', count: 3 + lois.length, color: '#16A34A' },
-    { label: 'Agreement', count: 2 + agreements.length, color: '#F59E0B' },
-    { label: 'Handover', count: 2 + projects.filter((p) => p.closingStatus !== 'Project Activated').length, color: '#7C3AED' },
-    { label: 'Operations', count: 21 + projects.filter((p) => p.closingStatus === 'Project Activated').length, color: '#38BDF8' },
-  ];
-  const pipelineTotal = pipelineSegments.reduce((s, x) => s + x.count, 0);
+  // Live pipeline breakdown across actual ERP records
+  const pipelineSegments = useMemo(() => {
+    const proposalStage = proposals.length;
+    const loiStage = lois.length;
+    const agreementStage = agreements.length;
+    const handoverStage = projects.filter((p) => p.closingStatus !== 'Project Activated').length;
+    const operationsStage = projects.filter((p) => p.closingStatus === 'Project Activated').length;
 
-  const revenueBars =
-    chartGranularity === 'monthly'
-      ? HISTORICAL_REVENUE_SERIES
-      : [
-          { month: 'Q2 FY25', invoicedCr: 4.18, receivedCr: 3.44 },
-          { month: 'Q3 FY25', invoicedCr: 5.87, receivedCr: 4.82 },
-        ];
+    return [
+      { label: 'Proposals', count: proposalStage, color: '#2463EB' },
+      { label: 'LOIs', count: loiStage, color: '#059669' },
+      { label: 'Agreements', count: agreementStage, color: '#D97706' },
+      { label: 'Handover', count: handoverStage, color: '#7C3AED' },
+      { label: 'Operations', count: operationsStage, color: '#0284C7' },
+    ];
+  }, [proposals.length, lois.length, agreements.length, projects]);
 
-  const maxRev = Math.max(...revenueBars.map((r) => Math.max(r.invoicedCr, r.receivedCr)), 2.5);
+  const pipelineTotal = Math.max(
+    1,
+    pipelineSegments.reduce((sum, seg) => sum + seg.count, 0)
+  );
 
-  const recentActivities = [
-    {
-      title: 'Agreement signed with Urban Square Facilities',
-      meta: 'Contract value: ₹ 1.85 Cr · 10 mins ago',
-      icon: FileSignature,
-      tone: 'bg-[#E8F5EE] text-emerald-700',
-      target: 'agreements' as NavModuleId,
-    },
-    {
-      title: 'LOI received from Apex Business Park',
-      meta: 'Estimated value: ₹ 0.92 Cr · SMS awaiting verification',
-      icon: FileCheck2,
-      tone: 'bg-blue-50 text-[#2463EB]',
-      target: 'loi' as NavModuleId,
-    },
-    {
-      title: 'Proposal revised for Greenfield Estates',
-      meta: 'Revision V2 · Pending approval',
-      icon: FileText,
-      tone: 'bg-[#FFF2E5] text-amber-700',
-      target: 'attrition' as NavModuleId,
-    },
-    {
-      title: 'Invoice INV-01458 generated for Metro Corporate Tower',
-      meta: 'Amount: ₹ 24.80 L · Finance SMS verified',
-      icon: Receipt,
-      tone: 'bg-slate-100 text-slate-700',
-      target: 'invoicing' as NavModuleId,
-    },
-  ];
+  // Chart data with genuine scale (Lakhs / Crores)
+  const revenueBars = useMemo(() => {
+    if (chartGranularity === 'live') {
+      return invoices.map((inv) => ({
+        key: inv.id,
+        label: inv.invoiceNumber,
+        invoicedVal: Number((inv.totalAmount / 100000).toFixed(2)), // Lakhs
+        receivedVal: Number(((inv.paidAmount + inv.tdsAmount) / 100000).toFixed(2)),
+        unit: 'L',
+      }));
+    }
+    if (chartGranularity === 'quarterly') {
+      return [
+        { key: 'Q2-FY25', label: 'Q2 FY25', invoicedVal: 4.18, receivedVal: 3.44, unit: 'Cr' },
+        { key: 'Q3-FY25', label: 'Q3 FY25', invoicedVal: 5.87, receivedVal: 4.82, unit: 'Cr' },
+        {
+          key: 'CURR',
+          label: 'Active Cycle',
+          invoicedVal: Number((metrics.invoicedTotal / 10000000).toFixed(2)),
+          receivedVal: Number((metrics.receivedTotal / 10000000).toFixed(2)),
+          unit: 'Cr',
+        },
+      ];
+    }
+    return HISTORICAL_REVENUE_SERIES.map((d) => ({
+      key: d.month,
+      label: d.month,
+      invoicedVal: d.invoicedCr,
+      receivedVal: d.receivedCr,
+      unit: 'Cr',
+    }));
+  }, [chartGranularity, invoices, metrics.invoicedTotal, metrics.receivedTotal]);
 
-  const upcomingDates = [
-    { event: 'Proposal Validity', entity: 'Apex Business Park', date: 'Jan 18, 2025', target: 'proposals' as NavModuleId },
-    { event: 'Agreement Renewal', entity: 'Sunrise Hospitals', date: 'Jan 25, 2025', target: 'agreements' as NavModuleId },
-    { event: 'Invoice Due', entity: 'Metro Corporate Tower', date: 'Jan 28, 2025', target: 'invoicing' as NavModuleId },
-    { event: 'Project Handover', entity: 'Riverside Resort', date: 'Feb 03, 2025', target: 'projects' as NavModuleId },
-  ];
+  const chartUnit = revenueBars[0]?.unit || 'Cr';
+  const rawMax = Math.max(...revenueBars.map((b) => Math.max(b.invoicedVal, b.receivedVal)), 1);
+  const yMax = chartUnit === 'L' ? Math.ceil(rawMax / 5) * 5 : Math.ceil(rawMax * 2) / 2;
+  const yTicks = [yMax, yMax * 0.75, yMax * 0.5, yMax * 0.25, 0];
+
+  const totalBarInvoiced = revenueBars.reduce((s, b) => s + b.invoicedVal, 0);
+  const totalBarReceived = revenueBars.reduce((s, b) => s + b.receivedVal, 0);
+  const barCollectionPct =
+    totalBarInvoiced > 0 ? Math.round((totalBarReceived / totalBarInvoiced) * 100) : 0;
+
+  // Dynamic Recent Operations Feed built from actual ERP records
+  const liveFeed = useMemo(() => {
+    const items: Array<{
+      id: string;
+      title: string;
+      meta: string;
+      icon: React.FC<{ className?: string }>;
+      tone: string;
+      target: NavModuleId;
+    }> = [];
+
+    if (proposals[0]) {
+      const p0 = proposals[0];
+      const v0 = p0.versions.find((v) => v.version === p0.currentVersion) || p0.versions[0];
+      const c0 = clients.find((c) => c.id === p0.clientId);
+      items.push({
+        id: p0.id,
+        title: `${p0.reference} · ${c0?.companyName || p0.siteName}`,
+        meta: `${v0.version} (${v0.status}) · ${formatInrFull(v0.monthlySellingPrice)}/mo`,
+        icon: FileText,
+        tone: 'bg-blue-50 text-[#2463EB]',
+        target: 'proposals',
+      });
+    }
+
+    if (lois[0]) {
+      const l0 = lois[0];
+      items.push({
+        id: l0.id,
+        title: `${l0.reference} · ${l0.clientName}`,
+        meta: `${l0.status} · ${l0.paymentTerms}`,
+        icon: FileCheck2,
+        tone: 'bg-emerald-50 text-emerald-700',
+        target: 'loi',
+      });
+    }
+
+    const pendingAgreement = agreements.find((a) => a.status !== 'Executed') || agreements[0];
+    if (pendingAgreement) {
+      items.push({
+        id: pendingAgreement.id,
+        title: `${pendingAgreement.reference} · ${pendingAgreement.clientName}`,
+        meta: `${pendingAgreement.status} · ${formatInrCompact(pendingAgreement.annualValue)}/yr`,
+        icon: FileSignature,
+        tone: 'bg-amber-50 text-amber-700',
+        target: 'agreements',
+      });
+    }
+
+    const pendingInvoice = invoices.find((i) => i.status !== 'Paid') || invoices[0];
+    if (pendingInvoice) {
+      items.push({
+        id: pendingInvoice.id,
+        title: `${pendingInvoice.invoiceNumber} · ${pendingInvoice.clientName}`,
+        meta: `${pendingInvoice.status} · Due ${pendingInvoice.dueDate}`,
+        icon: Receipt,
+        tone: 'bg-slate-100 text-slate-700',
+        target: 'invoicing',
+      });
+    }
+
+    return items;
+  }, [proposals, clients, lois, agreements, invoices]);
+
+  // Dynamic Schedule / Due Dates pulled from real records
+  const upcomingDates = useMemo(() => {
+    const rows: Array<{
+      id: string;
+      event: string;
+      entity: string;
+      date: string;
+      target: NavModuleId;
+    }> = [];
+
+    proposals.slice(0, 2).forEach((p) => {
+      const c = clients.find((cl) => cl.id === p.clientId);
+      rows.push({
+        id: `due-${p.id}`,
+        event: 'Proposal Validity',
+        entity: c?.companyName || p.siteName,
+        date: p.validityDate,
+        target: 'proposals',
+      });
+    });
+
+    projects
+      .filter((p) => p.closingStatus !== 'Project Activated')
+      .slice(0, 1)
+      .forEach((p) => {
+        rows.push({
+          id: `due-${p.id}`,
+          event: 'Site Mobilization',
+          entity: p.clientName,
+          date: p.mobilizationDate,
+          target: 'projects',
+        });
+      });
+
+    invoices
+      .filter((i) => i.status !== 'Paid')
+      .slice(0, 2)
+      .forEach((inv) => {
+        rows.push({
+          id: `due-${inv.id}`,
+          event: `Invoice ${inv.invoiceNumber}`,
+          entity: inv.clientName,
+          date: inv.dueDate,
+          target: 'invoicing',
+        });
+      });
+
+    return rows.slice(0, 4);
+  }, [proposals, clients, projects, invoices]);
 
   const kpiCards = [
     {
-      label: 'Total Clients',
+      label: 'Clients',
       value: String(metrics.totalClients),
-      delta: '+8% vs last month',
-      positive: true,
+      sub: `${metrics.verifiedClients} SMS verified`,
       icon: Users,
       iconBg: 'bg-blue-50 text-[#2463EB]',
       target: 'clients' as NavModuleId,
     },
     {
-      label: 'Total Projects',
+      label: 'Active Sites',
       value: String(metrics.totalProjects),
-      delta: '+12% vs last month',
-      positive: true,
+      sub: `${metrics.totalManpower} deployed staff`,
       icon: Briefcase,
-      iconBg: 'bg-[#E8F5EE] text-emerald-700',
+      iconBg: 'bg-emerald-50 text-emerald-700',
       target: 'projects' as NavModuleId,
     },
     {
-      label: 'Active Proposals',
+      label: 'Proposals',
       value: String(metrics.activeProposalsCount),
-      delta: '+20% vs last month',
-      positive: true,
+      sub: `${metrics.approvedProposals} approved`,
       icon: FileText,
-      iconBg: 'bg-[#FFF2E5] text-amber-700',
+      iconBg: 'bg-amber-50 text-amber-700',
       target: 'proposals' as NavModuleId,
     },
     {
-      label: 'Pending LOIs',
+      label: 'Open LOIs',
       value: String(metrics.pendingLoisCount),
-      delta: '-13% vs last month',
-      positive: false,
+      sub: `${metrics.totalLoisCount} total issued`,
       icon: FileCheck2,
       iconBg: 'bg-indigo-50 text-indigo-700',
       target: 'loi' as NavModuleId,
     },
     {
-      label: 'Agreements Signed',
-      value: String(metrics.signedAgreementsCount),
-      delta: '+17% vs last month',
-      positive: true,
+      label: 'Agreements',
+      value: String(metrics.totalAgreementsCount),
+      sub: `${metrics.executedAgreements} executed`,
       icon: FileSignature,
       iconBg: 'bg-sky-50 text-sky-700',
       target: 'agreements' as NavModuleId,
     },
     {
-      label: 'Total Contract Value',
-      value: formatInrCompact(metrics.activeContractValue),
-      delta: '+22% vs last month',
-      positive: true,
+      label: 'Contract Book',
+      value: formatInrCompact(metrics.contractPortfolioValue),
+      sub: 'Annualized value',
       icon: IndianRupee,
-      iconBg: 'bg-[#E8F5EE] text-emerald-700',
+      iconBg: 'bg-emerald-50 text-emerald-700',
       target: 'reports' as NavModuleId,
     },
   ];
 
-  // Build SVG Donut arcs
-  const radius = 56;
+  // Crisp compact SVG Donut geometry (never clips)
+  const radius = 40;
   const circumference = 2 * Math.PI * radius;
   let cumulativeFraction = 0;
 
   return (
     <div className="space-y-5">
-      {/* Header Row */}
+      {/* Operational Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-[#14263D]">
-            Welcome Back, {userName}
+          <h1 className="text-xl font-bold tracking-tight text-[#14263D]">
+            Operations & Commercial Control Desk
           </h1>
-          <p className="text-sm text-slate-600 mt-0.5">
-            Live commercial, operational, and SMS-verified financial summary across all six ERP stages.
+          <p className="text-xs text-slate-600 mt-0.5">
+            Signed in as <span className="font-semibold text-[#14263D]">{userName}</span> · Reconciled live across Clients, Cost Sheets, LOIs, Sites & Billing.
           </p>
         </div>
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => onNavigate('sms')}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-[#14263D] hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-[#14263D] hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
           >
-            <ShieldCheck className="h-4 w-4 text-emerald-600" />
+            <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
             <span className="tabular-nums">
-              SMS Verified: {smsStats.totalVerified} / {smsStats.totalDispatched}
+              SMS Verified: {smsStats.totalVerified}/{smsStats.totalDispatched}
             </span>
           </button>
           <div className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5">
-            <Calendar className="h-4 w-4 text-slate-500" />
+            <Calendar className="h-3.5 w-3.5 text-slate-500" />
             <select
               value={periodFilter}
-              onChange={(e) => setPeriodFilter(e.target.value as 'month' | 'quarter' | 'fy')}
-              aria-label="Select dashboard reporting period"
+              onChange={(e) => setPeriodFilter(e.target.value as 'all' | 'fy26' | 'fy25')}
+              aria-label="Select reporting cycle"
               className="bg-transparent text-xs font-medium text-[#14263D] focus:outline-none"
             >
-              <option value="month">This Month (Jan 01 – Jan 31, 2025)</option>
-              <option value="quarter">Quarter (Nov 2024 – Jan 2025)</option>
-              <option value="fy">Financial Year 2024–25</option>
+              <option value="all">All Active Cycles</option>
+              <option value="fy26">FY 2026–27 (Current)</option>
+              <option value="fy25">FY 2025–26</option>
             </select>
           </div>
         </div>
       </div>
 
-      {/* 6 KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+      {/* 6 Reconciled KPI Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3.5">
         {kpiCards.map((card) => {
           const Icon = card.icon;
           return (
@@ -272,134 +395,148 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               key={card.label}
               type="button"
               onClick={() => onNavigate(card.target)}
-              className="text-left rounded-xl border border-slate-200 bg-white p-4 hover:border-[#2463EB]/50 transition-colors focus-visible:outline-2 focus-visible:outline-[#2463EB]"
+              className="group text-left rounded-xl border border-slate-200 bg-white p-4 hover:border-[#2463EB]/60 transition-colors focus-visible:outline-2 focus-visible:outline-[#2463EB]"
             >
-              <div className="flex items-center gap-3">
-                <div className={`flex h-10 w-10 items-center justify-center rounded-lg shrink-0 ${card.iconBg}`}>
-                  <Icon className="h-5 w-5" />
+              <div className="flex items-center justify-between gap-2">
+                <div className={`flex h-8 w-8 items-center justify-center rounded-lg shrink-0 ${card.iconBg}`}>
+                  <Icon className="h-4 w-4" />
                 </div>
-                <div className="min-w-0">
-                  <div className="text-xl font-bold text-[#14263D] tabular-nums truncate">
-                    {card.value}
-                  </div>
-                  <div className="text-xs text-slate-500 truncate">{card.label}</div>
-                </div>
+                <ArrowUpRight className="h-3.5 w-3.5 text-slate-300 group-hover:text-[#2463EB] transition-colors" />
               </div>
-              <div
-                className={`mt-3 text-xs font-medium tabular-nums ${
-                  card.positive ? 'text-emerald-700' : 'text-rose-700'
-                }`}
-              >
-                {card.delta}
+              <div className="mt-3 text-xl font-bold text-[#14263D] tabular-nums truncate">
+                {card.value}
               </div>
+              <div className="text-xs font-medium text-slate-700 truncate">{card.label}</div>
+              <div className="mt-1 text-[11px] text-slate-500 tabular-nums truncate">{card.sub}</div>
             </button>
           );
         })}
       </div>
 
-      {/* Middle Row: Revenue Overview + Project Pipeline + Invoices & Collections */}
+      {/* Middle Row: Revenue Overview + Project Pipeline + Billing Ledger */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* Revenue Overview */}
-        <div className="lg:col-span-5 rounded-xl border border-slate-200 bg-white p-5">
-          <div className="flex items-center justify-between gap-2 mb-4">
+        {/* Revenue & Collection Chart with Real Y-Axis & Gridlines */}
+        <div className="lg:col-span-5 rounded-xl border border-slate-200 bg-white p-5 overflow-hidden">
+          <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
             <div>
-              <h2 className="text-base font-semibold text-[#14263D]">Revenue Overview</h2>
-              <div className="mt-1 flex items-center gap-4 text-xs text-slate-600">
+              <h2 className="text-sm font-semibold text-[#14263D]">Billing & Collection Trend</h2>
+              <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] text-slate-600 tabular-nums">
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="h-2.5 w-2.5 rounded-sm bg-[#2463EB]" />
-                  Invoiced
+                  <span className="h-2 w-2 rounded-xs bg-[#2463EB]" />
+                  Invoiced ({totalBarInvoiced.toFixed(2)} {chartUnit})
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="h-2.5 w-2.5 rounded-sm bg-[#16A34A]" />
-                  Received
+                  <span className="h-2 w-2 rounded-xs bg-[#16A34A]" />
+                  Received ({barCollectionPct}%)
                 </span>
               </div>
             </div>
-            <div className="inline-flex rounded-lg bg-[#F3F6FA] p-1 border border-slate-200">
-              <button
-                type="button"
-                onClick={() => setChartGranularity('monthly')}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                  chartGranularity === 'monthly'
-                    ? 'bg-white text-[#14263D] shadow-xs'
-                    : 'text-slate-600 hover:text-[#14263D]'
-                }`}
-              >
-                Monthly
-              </button>
-              <button
-                type="button"
-                onClick={() => setChartGranularity('quarterly')}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                  chartGranularity === 'quarterly'
-                    ? 'bg-white text-[#14263D] shadow-xs'
-                    : 'text-slate-600 hover:text-[#14263D]'
-                }`}
-              >
-                Quarterly
-              </button>
+            <div className="inline-flex rounded-lg bg-[#F3F6FA] p-0.5 border border-slate-200">
+              {(
+                [
+                  { id: 'monthly', label: 'Monthly' },
+                  { id: 'quarterly', label: 'Quarterly' },
+                  { id: 'live', label: 'Live Bills' },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setChartGranularity(tab.id)}
+                  className={`px-2 py-1 text-[11px] font-medium rounded-md transition-colors ${
+                    chartGranularity === tab.id
+                      ? 'bg-white text-[#14263D] shadow-xs'
+                      : 'text-slate-600 hover:text-[#14263D]'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
             </div>
           </div>
 
-          <div className="h-56 flex flex-col justify-end">
-            <div className="flex-1 flex items-end justify-between gap-3 border-b border-slate-200 pb-2 px-1">
-              {revenueBars.map((bar) => {
-                const invHeight = Math.max(12, Math.round((bar.invoicedCr / maxRev) * 156));
-                const recHeight = Math.max(10, Math.round((bar.receivedCr / maxRev) * 156));
-                const isHovered = hoveredMonth === bar.month;
-                return (
-                  <div
-                    key={bar.month}
-                    onMouseEnter={() => setHoveredMonth(bar.month)}
-                    onMouseLeave={() => setHoveredMonth(null)}
-                    className="relative flex-1 flex flex-col items-center group"
-                  >
-                    {isHovered && (
-                      <div className="absolute -top-11 z-10 whitespace-nowrap rounded-md bg-[#14263D] px-2 py-1 text-[11px] text-white shadow-md tabular-nums">
-                        Inv: ₹ {bar.invoicedCr.toFixed(2)} Cr · Rec: ₹ {bar.receivedCr.toFixed(2)} Cr
-                      </div>
-                    )}
-                    <div className="flex items-end gap-1.5 h-40">
-                      <div
-                        style={{ height: `${invHeight}px` }}
-                        className="w-4 sm:w-5 rounded-t bg-[#2463EB] transition-opacity group-hover:opacity-90"
-                        title={`Invoiced: ₹ ${bar.invoicedCr} Cr`}
-                      />
-                      <div
-                        style={{ height: `${recHeight}px` }}
-                        className="w-4 sm:w-5 rounded-t bg-[#16A34A] transition-opacity group-hover:opacity-90"
-                        title={`Received: ₹ ${bar.receivedCr} Cr`}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="flex justify-between gap-3 pt-2 px-1">
-              {revenueBars.map((bar) => (
-                <div key={bar.month} className="flex-1 text-center text-[11px] font-medium text-slate-500 tabular-nums">
-                  {bar.month}
-                </div>
+          <div className="flex gap-2.5 pt-2">
+            {/* Y-Axis Labels */}
+            <div className="flex flex-col justify-between h-44 text-[10px] font-mono text-slate-400 tabular-nums text-right pr-1 shrink-0 select-none pb-0.5">
+              {yTicks.map((tick) => (
+                <span key={tick}>
+                  {tick === 0 ? '0' : `₹${tick.toFixed(chartUnit === 'L' ? 0 : 1)}${chartUnit}`}
+                </span>
               ))}
+            </div>
+
+            {/* Plot Area */}
+            <div className="flex-1 min-w-0">
+              <div className="relative h-44 flex items-end justify-between gap-2 border-b border-l border-slate-200 px-2">
+                {/* Horizontal Dashed Reference Lines */}
+                <div className="pointer-events-none absolute inset-0 flex flex-col justify-between">
+                  {yTicks.slice(0, -1).map((tick) => (
+                    <div key={tick} className="w-full border-t border-dashed border-slate-100" />
+                  ))}
+                  <div />
+                </div>
+
+                {revenueBars.map((bar) => {
+                  const invPct = Math.max(4, Math.min(100, (bar.invoicedVal / yMax) * 100));
+                  const recPct = Math.max(2, Math.min(100, (bar.receivedVal / yMax) * 100));
+                  const isHovered = hoveredBarKey === bar.key;
+
+                  return (
+                    <div
+                      key={bar.key}
+                      onMouseEnter={() => setHoveredBarKey(bar.key)}
+                      onMouseLeave={() => setHoveredBarKey(null)}
+                      className="relative z-10 flex-1 h-full flex items-end justify-center group"
+                    >
+                      {isHovered && (
+                        <div className="absolute -top-9 left-1/2 -translate-x-1/2 z-20 whitespace-nowrap rounded border border-slate-700 bg-[#14263D] px-2 py-1 text-[10px] font-mono text-white shadow-md tabular-nums">
+                          Inv ₹{bar.invoicedVal}{bar.unit} · Rec ₹{bar.receivedVal}{bar.unit}
+                        </div>
+                      )}
+                      <div className="flex items-end gap-1 h-full pb-px">
+                        <div
+                          style={{ height: `${invPct}%` }}
+                          className="w-3 sm:w-4 rounded-t-[2px] bg-[#2463EB] transition-opacity group-hover:opacity-85"
+                        />
+                        <div
+                          style={{ height: `${recPct}%` }}
+                          className="w-3 sm:w-4 rounded-t-[2px] bg-[#16A34A] transition-opacity group-hover:opacity-85"
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex justify-between gap-2 pt-2 px-2">
+                {revenueBars.map((bar) => (
+                  <div
+                    key={bar.key}
+                    className="flex-1 text-center text-[10px] font-medium text-slate-500 tabular-nums truncate"
+                  >
+                    {bar.label}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Project Pipeline Donut */}
-        <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-5">
+        {/* Project Pipeline (Responsive Layout — Zero Overflow) */}
+        <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-5 overflow-hidden">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-base font-semibold text-[#14263D]">Project Pipeline</h2>
+            <h2 className="text-sm font-semibold text-[#14263D]">Commercial Pipeline</h2>
             <button
               type="button"
               onClick={() => onNavigate('projects')}
               className="text-xs font-medium text-[#2463EB] hover:underline"
             >
-              View Projects
+              View Sites
             </button>
           </div>
-          <div className="flex flex-col sm:flex-row items-center gap-5">
-            <div className="relative h-40 w-40 shrink-0">
-              <svg viewBox="0 0 150 150" className="h-full w-full -rotate-90">
+          <div className="flex flex-col sm:flex-row lg:flex-col xl:flex-row items-center gap-4">
+            <div className="relative h-28 w-28 shrink-0">
+              <svg viewBox="0 0 112 112" className="h-full w-full -rotate-90">
                 {pipelineSegments.map((seg) => {
                   const fraction = seg.count / pipelineTotal;
                   const dash = fraction * circumference;
@@ -408,12 +545,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   return (
                     <circle
                       key={seg.label}
-                      cx="75"
-                      cy="75"
+                      cx="56"
+                      cy="56"
                       r={radius}
                       fill="transparent"
                       stroke={seg.color}
-                      strokeWidth="22"
+                      strokeWidth="15"
                       strokeDasharray={`${dash} ${circumference}`}
                       strokeDashoffset={offset}
                     />
@@ -421,23 +558,28 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 })}
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                <span className="text-2xl font-bold text-[#14263D] tabular-nums">{pipelineTotal}</span>
-                <span className="text-xs text-slate-500">Projects</span>
+                <span className="text-lg font-bold text-[#14263D] tabular-nums leading-none">
+                  {pipelineTotal}
+                </span>
+                <span className="text-[10px] text-slate-500 mt-0.5">Records</span>
               </div>
             </div>
 
-            <div className="w-full space-y-2.5">
+            <div className="w-full min-w-0 flex-1 space-y-2">
               {pipelineSegments.map((seg) => {
                 const pct = Math.round((seg.count / pipelineTotal) * 100);
                 return (
-                  <div key={seg.label} className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2">
-                      <span className="h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: seg.color }} />
-                      <span className="font-medium text-slate-700">{seg.label}</span>
+                  <div key={seg.label} className="flex items-center justify-between gap-2 text-xs min-w-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className="h-2 w-2 rounded-xs shrink-0"
+                        style={{ backgroundColor: seg.color }}
+                      />
+                      <span className="font-medium text-slate-700 truncate">{seg.label}</span>
                     </div>
-                    <div className="flex items-center gap-3 tabular-nums">
+                    <div className="flex items-center gap-2 tabular-nums shrink-0">
                       <span className="text-slate-500">({seg.count})</span>
-                      <span className="w-8 text-right font-semibold text-[#14263D]">{pct}%</span>
+                      <span className="w-9 text-right font-semibold text-[#14263D]">{pct}%</span>
                     </div>
                   </div>
                 );
@@ -446,69 +588,64 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Invoices & Collections */}
-        <div className="lg:col-span-3 rounded-xl border border-slate-200 bg-white p-5 flex flex-col justify-between">
+        {/* Invoices & Collections (Reconciled Live Ledger) */}
+        <div className="lg:col-span-3 rounded-xl border border-slate-200 bg-white p-5 flex flex-col justify-between overflow-hidden">
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-base font-semibold text-[#14263D]">Invoices & Collections</h2>
+              <h2 className="text-sm font-semibold text-[#14263D]">Receivables Ledger</h2>
               <button
                 type="button"
                 onClick={() => onNavigate('payments')}
                 className="text-xs font-medium text-[#2463EB] hover:underline"
               >
-                Ledger
+                Payments
               </button>
             </div>
             <div className="divide-y divide-slate-100">
-              <div className="py-3 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-[#2463EB]">
+              <div className="py-2.5 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-[#2463EB] shrink-0">
                     <Receipt className="h-4 w-4" />
                   </div>
-                  <div>
-                    <div className="text-sm font-bold text-[#14263D] tabular-nums">
-                      {formatInrCompact(metrics.invoicedThisMonth)}
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-[#14263D] tabular-nums truncate">
+                      {formatInrFull(metrics.invoicedTotal)}
                     </div>
-                    <div className="text-xs text-slate-500">Invoiced This Month</div>
+                    <div className="text-[11px] text-slate-500">Total Billed ({invoices.length} bills)</div>
                   </div>
                 </div>
-                <span className="rounded bg-[#E8F5EE] px-2 py-0.5 text-[11px] font-semibold text-emerald-800 tabular-nums">
-                  +18%
-                </span>
               </div>
 
-              <div className="py-3 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#E8F5EE] text-emerald-700">
+              <div className="py-2.5 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 shrink-0">
                     <Wallet className="h-4 w-4" />
                   </div>
-                  <div>
-                    <div className="text-sm font-bold text-[#14263D] tabular-nums">
-                      {formatInrCompact(metrics.receivedThisMonth)}
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-[#14263D] tabular-nums truncate">
+                      {formatInrFull(metrics.receivedTotal)}
                     </div>
-                    <div className="text-xs text-slate-500">Received This Month</div>
+                    <div className="text-[11px] text-slate-500">
+                      Collected · {metrics.collectionRatio}% settled
+                    </div>
                   </div>
                 </div>
-                <span className="rounded bg-[#E8F5EE] px-2 py-0.5 text-[11px] font-semibold text-emerald-800 tabular-nums">
-                  +15%
-                </span>
               </div>
 
-              <div className="py-3 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FFF2E5] text-amber-700">
+              <div className="py-2.5 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-50 text-amber-700 shrink-0">
                     <Clock className="h-4 w-4" />
                   </div>
-                  <div>
-                    <div className="text-sm font-bold text-[#14263D] tabular-nums">
-                      {formatInrCompact(metrics.outstandingAmount)}
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-[#14263D] tabular-nums truncate">
+                      {formatInrFull(metrics.outstandingTotal)}
                     </div>
-                    <div className="text-xs text-slate-500">Outstanding Amount</div>
+                    <div className="text-[11px] text-slate-500">
+                      Net Outstanding (TDS {formatInrCompact(metrics.tdsTotal)})
+                    </div>
                   </div>
                 </div>
-                <span className="rounded bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700 tabular-nums">
-                  +6%
-                </span>
               </div>
             </div>
           </div>
@@ -516,47 +653,48 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <button
             type="button"
             onClick={onOpenSmsInbox}
-            className="mt-3 flex w-full items-center justify-between rounded-lg border border-slate-200 bg-[#F3F6FA] px-3 py-2.5 text-xs font-medium text-[#14263D] hover:bg-slate-100 transition-colors"
+            className="mt-3 flex w-full items-center justify-between rounded-lg border border-slate-200 bg-[#F3F6FA] px-3 py-2 text-xs font-medium text-[#14263D] hover:bg-slate-100 transition-colors"
           >
-            <span className="inline-flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-[#2463EB]" />
-              Open Live SMS Receiver ({smsStats.pendingVerification} pending)
+            <span className="truncate tabular-nums">
+              SMS Inbox ({smsStats.pendingVerification} pending verification)
             </span>
-            <ChevronRight className="h-4 w-4 text-slate-400" />
+            <ChevronRight className="h-4 w-4 text-slate-400 shrink-0" />
           </button>
         </div>
       </div>
 
-      {/* Bottom Row: Recent Activities + Upcoming Key Dates + Project Status */}
+      {/* Bottom Row: Live Operations Queue + Upcoming Dates + Stage Breakdown */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* Recent Activities */}
-        <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-5">
+        {/* Live Record Queue */}
+        <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-5 overflow-hidden">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-base font-semibold text-[#14263D]">Recent Activities</h2>
+            <h2 className="text-sm font-semibold text-[#14263D]">Active Commercial Records</h2>
             <button
               type="button"
-              onClick={() => onNavigate('reports')}
+              onClick={() => onNavigate('proposals')}
               className="text-xs font-medium text-[#2463EB] hover:underline"
             >
-              View All
+              Proposals
             </button>
           </div>
           <div className="divide-y divide-slate-100">
-            {recentActivities.map((act) => {
+            {liveFeed.map((act) => {
               const Icon = act.icon;
               return (
                 <button
-                  key={act.title}
+                  key={act.id}
                   type="button"
                   onClick={() => onNavigate(act.target)}
-                  className="w-full py-3 flex items-start gap-3 text-left hover:bg-[#F3F6FA]/70 rounded-lg px-1.5 transition-colors"
+                  className="w-full py-2.5 flex items-start gap-3 text-left hover:bg-[#F3F6FA]/70 rounded-lg px-1.5 transition-colors"
                 >
-                  <div className={`flex h-8 w-8 items-center justify-center rounded-lg shrink-0 mt-0.5 ${act.tone}`}>
-                    <Icon className="h-4 w-4" />
+                  <div className={`flex h-7 w-7 items-center justify-center rounded-md shrink-0 mt-0.5 ${act.tone}`}>
+                    <Icon className="h-3.5 w-3.5" />
                   </div>
                   <div className="min-w-0">
-                    <div className="text-xs font-semibold text-[#14263D] leading-snug">{act.title}</div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">{act.meta}</div>
+                    <div className="text-xs font-semibold text-[#14263D] leading-snug truncate">
+                      {act.title}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5 truncate">{act.meta}</div>
                   </div>
                 </button>
               );
@@ -564,36 +702,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Upcoming Key Dates */}
-        <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-5">
+        {/* Upcoming Milestones & Due Dates */}
+        <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-5 overflow-hidden">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-base font-semibold text-[#14263D]">Upcoming Key Dates</h2>
+            <h2 className="text-sm font-semibold text-[#14263D]">Scheduled Deadlines</h2>
             <button
               type="button"
-              onClick={() => onNavigate('agreements')}
+              onClick={() => onNavigate('invoicing')}
               className="text-xs font-medium text-[#2463EB] hover:underline"
             >
-              View All
+              Billing Schedule
             </button>
           </div>
           <table className="w-full text-left text-xs">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
-                <th className="py-2 font-medium">Event</th>
-                <th className="py-2 font-medium">Client / Project</th>
-                <th className="py-2 font-medium text-right">Due Date</th>
+                <th className="py-2 font-medium">Milestone</th>
+                <th className="py-2 font-medium">Client</th>
+                <th className="py-2 font-medium text-right">Date</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {upcomingDates.map((item) => (
                 <tr
-                  key={item.event}
+                  key={item.id}
                   onClick={() => onNavigate(item.target)}
                   className="cursor-pointer hover:bg-[#F3F6FA] transition-colors"
                 >
-                  <td className="py-2.5 font-medium text-[#14263D]">{item.event}</td>
-                  <td className="py-2.5 text-slate-600">{item.entity}</td>
-                  <td className="py-2.5 text-right font-medium text-rose-700 tabular-nums whitespace-nowrap">
+                  <td className="py-2.5 font-medium text-[#14263D] truncate max-w-[110px]">
+                    {item.event}
+                  </td>
+                  <td className="py-2.5 text-slate-600 truncate max-w-[130px]">{item.entity}</td>
+                  <td className="py-2.5 text-right font-mono text-[11px] font-medium text-slate-700 tabular-nums whitespace-nowrap">
                     {item.date}
                   </td>
                 </tr>
@@ -602,34 +742,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </table>
         </div>
 
-        {/* Project Status */}
-        <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-5">
+        {/* Stage Distribution */}
+        <div className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-5 overflow-hidden">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-base font-semibold text-[#14263D]">Project Status</h2>
+            <h2 className="text-sm font-semibold text-[#14263D]">Workflow Stage Distribution</h2>
             <button
               type="button"
               onClick={() => onNavigate('projects')}
               className="text-xs font-medium text-[#2463EB] hover:underline"
             >
-              View All
+              Site Handover
             </button>
           </div>
-          <div className="space-y-4 pt-1">
+          <div className="space-y-3.5 pt-1">
             {[
-              { label: 'In Operations', count: pipelineSegments[4].count, color: 'bg-[#16A34A]' },
+              { label: 'In Operations', count: pipelineSegments[4].count, color: 'bg-[#0284C7]' },
               { label: 'Handover', count: pipelineSegments[3].count, color: 'bg-[#7C3AED]' },
-              { label: 'Agreement', count: pipelineSegments[2].count, color: 'bg-[#F59E0B]' },
-              { label: 'LOI', count: pipelineSegments[1].count, color: 'bg-[#2463EB]' },
-              { label: 'Proposal', count: pipelineSegments[0].count, color: 'bg-sky-400' },
+              { label: 'Agreements', count: pipelineSegments[2].count, color: 'bg-[#D97706]' },
+              { label: 'LOIs', count: pipelineSegments[1].count, color: 'bg-[#059669]' },
+              { label: 'Proposals', count: pipelineSegments[0].count, color: 'bg-[#2463EB]' },
             ].map((row) => {
               const pct = Math.round((row.count / pipelineTotal) * 100);
               return (
-                <div key={row.label} className="grid grid-cols-12 items-center gap-3 text-xs">
+                <div key={row.label} className="grid grid-cols-12 items-center gap-2.5 text-xs">
                   <span className="col-span-4 font-medium text-slate-700 truncate">{row.label}</span>
-                  <div className="col-span-6 h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                  <div className="col-span-5 h-2 rounded-full bg-slate-100 overflow-hidden">
                     <div className={`h-full rounded-full ${row.color}`} style={{ width: `${pct}%` }} />
                   </div>
-                  <span className="col-span-2 text-right font-semibold text-[#14263D] tabular-nums">
+                  <span className="col-span-3 text-right font-mono text-[11px] font-semibold text-[#14263D] tabular-nums">
                     {row.count} / {pipelineTotal}
                   </span>
                 </div>
@@ -637,9 +777,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             })}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-            <span className="inline-flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 tabular-nums">
               <Building2 className="h-3.5 w-3.5 text-slate-400" />
-              6 Industry Sectors Active
+              {metrics.totalManpower} Approved Site Personnel
             </span>
             <button
               type="button"
