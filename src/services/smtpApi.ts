@@ -71,28 +71,87 @@ export async function blobToBase64(blob: Blob): Promise<string> {
   return bytesToBase64(new Uint8Array(buffer));
 }
 
+async function readJsonPayload(res: Response): Promise<{
+  data: Record<string, unknown>;
+  nonJsonDetail?: string;
+}> {
+  const rawText = await res.text();
+  if (!rawText) {
+    return { data: {} };
+  }
+  try {
+    const parsed = JSON.parse(rawText);
+    return {
+      data: parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {},
+    };
+  } catch {
+    const preview = rawText
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 220);
+    return {
+      data: {},
+      nonJsonDetail: `Server returned HTTP ${res.status}${res.statusText ? ` (${res.statusText})` : ''}${preview ? `: ${preview}` : ' with an empty/non-JSON body.'}`,
+    };
+  }
+}
+
 export async function fetchSmtpStatus(): Promise<SmtpStatusDto> {
   const res = await fetch('/api/email/smtp-status');
-  const data = await res.json().catch(() => ({}));
+  const { data, nonJsonDetail } = await readJsonPayload(res);
   if (!res.ok) {
-    throw new Error(data?.message || data?.error || 'Failed to read SMTP status.');
+    throw new Error(
+      String(data?.message || data?.error || nonJsonDetail || `Failed to read SMTP status (HTTP ${res.status}).`)
+    );
   }
-  return data as SmtpStatusDto;
+  return data as unknown as SmtpStatusDto;
 }
 
 export async function saveAndVerifySmtpConfig(
   input: SmtpConfigInput
-): Promise<SmtpStatusDto & { verified?: boolean }> {
+): Promise<SmtpStatusDto & { verified?: boolean; logEntryId?: string }> {
   const res = await fetch('/api/email/smtp-config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
-  const data = await res.json().catch(() => ({}));
+  const { data, nonJsonDetail } = await readJsonPayload(res);
   if (!res.ok) {
-    throw new Error(data?.message || data?.error || 'Failed to verify SMTP settings.');
+    const message = String(
+      data?.message ||
+        data?.error ||
+        nonJsonDetail ||
+        `SMTP verification request failed with HTTP ${res.status}${res.statusText ? ` (${res.statusText})` : ''}.`
+    );
+    throw new SmtpConnectionError(message, {
+      status: res.status,
+      smtpErrorCode:
+        typeof data?.smtpErrorCode === 'string'
+          ? data.smtpErrorCode
+          : typeof data?.error === 'string'
+            ? data.error
+            : `HTTP_${res.status}`,
+      smtpResponseCode:
+        typeof data?.smtpResponseCode === 'number' ? data.smtpResponseCode : undefined,
+      smtpCommand: typeof data?.smtpCommand === 'string' ? data.smtpCommand : undefined,
+      smtpRawResponse:
+        typeof data?.smtpRawResponse === 'string' ? data.smtpRawResponse : nonJsonDetail,
+      actionHint:
+        typeof data?.actionHint === 'string'
+          ? data.actionHint
+          : nonJsonDetail
+            ? 'Check that the ERP Node.js backend is running cleanly and inspect the SMTP Activity Log for details.'
+            : undefined,
+      debuggingClues: Array.isArray(data?.debuggingClues)
+        ? (data.debuggingClues as string[])
+        : nonJsonDetail
+          ? [nonJsonDetail]
+          : undefined,
+      logEntryId: typeof data?.logEntryId === 'string' ? data.logEntryId : undefined,
+    });
   }
-  return data as SmtpStatusDto & { verified?: boolean };
+  return data as unknown as SmtpStatusDto & { verified?: boolean; logEntryId?: string };
 }
 
 export interface SmtpConnectionTestResult {
@@ -102,29 +161,100 @@ export interface SmtpConnectionTestResult {
   port: number;
   latencyMs?: number;
   tcpPingMs?: number;
+  banner?: string;
   message: string;
+  smtpErrorCode?: string;
+  smtpResponseCode?: number;
+  smtpCommand?: string;
+  smtpRawResponse?: string;
+  actionHint?: string;
+  debuggingClues?: string[];
+  handshakeTrace?: string[];
+  logEntryId?: string;
 }
 
-export async function testSmtpConnection(input: {
+export class SmtpConnectionError extends Error {
+  status: number;
+  smtpErrorCode?: string;
+  smtpResponseCode?: number;
+  smtpCommand?: string;
+  smtpRawResponse?: string;
+  actionHint?: string;
+  debuggingClues?: string[];
+  logEntryId?: string;
+
+  constructor(
+    message: string,
+    details: {
+      status: number;
+      smtpErrorCode?: string;
+      smtpResponseCode?: number;
+      smtpCommand?: string;
+      smtpRawResponse?: string;
+      actionHint?: string;
+      debuggingClues?: string[];
+      logEntryId?: string;
+    }
+  ) {
+    super(message);
+    this.name = 'SmtpConnectionError';
+    this.status = details.status;
+    this.smtpErrorCode = details.smtpErrorCode;
+    this.smtpResponseCode = details.smtpResponseCode;
+    this.smtpCommand = details.smtpCommand;
+    this.smtpRawResponse = details.smtpRawResponse;
+    this.actionHint = details.actionHint;
+    this.debuggingClues = details.debuggingClues;
+    this.logEntryId = details.logEntryId;
+  }
+}
+
+export async function pingSmtpConnection(input: {
   host: string;
   port: number;
   secure: boolean;
   user: string;
   pass?: string;
 }): Promise<SmtpConnectionTestResult> {
-  const res = await fetch('/api/email/smtp-test', {
+  const res = await fetch('/api/email/smtp-ping', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
-  const data = (await res.json().catch(() => ({}))) as Partial<SmtpConnectionTestResult> & {
-    error?: string;
-  };
+  const { data, nonJsonDetail } = await readJsonPayload(res);
   if (!res.ok) {
-    throw new Error(data?.message || data?.error || 'SMTP connection test failed.');
+    throw new SmtpConnectionError(
+      String(
+        data?.message ||
+          data?.error ||
+          nonJsonDetail ||
+          `SMTP connection ping failed (HTTP ${res.status}).`
+      ),
+      {
+        status: res.status,
+        smtpErrorCode:
+          typeof data?.smtpErrorCode === 'string'
+            ? data.smtpErrorCode
+            : typeof data?.error === 'string'
+              ? data.error
+              : undefined,
+        smtpResponseCode:
+          typeof data?.smtpResponseCode === 'number' ? data.smtpResponseCode : undefined,
+        smtpCommand: typeof data?.smtpCommand === 'string' ? data.smtpCommand : undefined,
+        smtpRawResponse:
+          typeof data?.smtpRawResponse === 'string' ? data.smtpRawResponse : nonJsonDetail,
+        actionHint: typeof data?.actionHint === 'string' ? data.actionHint : undefined,
+        debuggingClues: Array.isArray(data?.debuggingClues)
+          ? (data.debuggingClues as string[])
+          : undefined,
+        logEntryId: typeof data?.logEntryId === 'string' ? data.logEntryId : undefined,
+      }
+    );
   }
-  return data as SmtpConnectionTestResult;
+  return data as unknown as SmtpConnectionTestResult;
 }
+
+export const testSmtpConnection = pingSmtpConnection;
 
 export async function resetSmtpConfig(): Promise<SmtpStatusDto> {
   const res = await fetch('/api/email/smtp-reset', {
@@ -185,6 +315,8 @@ export interface SmtpActivityLogEntry {
   smtpResponseCode?: number;
   smtpCommand?: string;
   smtpRawResponse?: string;
+  actionHint?: string;
+  debuggingClues?: string[];
   handshakeTrace?: string[];
   attachmentCount: number;
   timestamp: string;

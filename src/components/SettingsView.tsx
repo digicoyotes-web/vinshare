@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { INDUSTRY_TEMPLATES, SERVICE_MASTER } from '../data/seedData';
+import { checkSmtpConnection } from '../services/smtp';
 import {
   buildEmptySmtpMetrics30Days,
   fetchSmtpLogs,
@@ -26,7 +27,7 @@ import {
   resetSmtpConfig,
   saveAndVerifySmtpConfig,
   sendEmailViaSmtp,
-  testSmtpConnection,
+  SmtpConnectionError,
   type SmtpActivityLogEntry,
   type SmtpEnvDiagnostics,
   type SmtpMetrics30Days,
@@ -65,6 +66,9 @@ export const SettingsView: React.FC = () => {
   const [smtpSaving, setSmtpSaving] = useState(false);
   const [smtpNotice, setSmtpNotice] = useState<string | null>(null);
   const [smtpError, setSmtpError] = useState<string | null>(null);
+  const [smtpActionHint, setSmtpActionHint] = useState<string | null>(null);
+  const [smtpDebugClues, setSmtpDebugClues] = useState<string[]>([]);
+  const [smtpFailedLogId, setSmtpFailedLogId] = useState<string | null>(null);
   const [testRecipient, setTestRecipient] = useState('digicoyotes@gmail.com');
   const [testingSend, setTestingSend] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
@@ -201,6 +205,9 @@ export const SettingsView: React.FC = () => {
   const handleSaveSmtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setSmtpError(null);
+    setSmtpActionHint(null);
+    setSmtpDebugClues([]);
+    setSmtpFailedLogId(null);
     setSmtpNotice(null);
     setSmtpSaving(true);
     try {
@@ -222,10 +229,19 @@ export const SettingsView: React.FC = () => {
       setSmtpNotice(
         `SMTP handshake verified! Outbound ERP emails will send via ${updated.host}:${updated.port} from ${updated.fromEmail}.`
       );
-      refreshSmtpLogs();
+      await refreshSmtpLogs();
     } catch (err) {
-      setSmtpError(err instanceof Error ? err.message : 'SMTP verification failed.');
-      refreshSmtpLogs();
+      const msg = err instanceof Error ? err.message : 'SMTP verification failed.';
+      setSmtpError(msg);
+      if (err instanceof SmtpConnectionError) {
+        setSmtpActionHint(err.actionHint || null);
+        setSmtpDebugClues(err.debuggingClues || []);
+        if (err.logEntryId) {
+          setSmtpFailedLogId(err.logEntryId);
+          setExpandedLogIds((prev) => ({ ...prev, [err.logEntryId!]: true }));
+        }
+      }
+      await refreshSmtpLogs();
     } finally {
       setSmtpSaving(false);
     }
@@ -259,6 +275,9 @@ export const SettingsView: React.FC = () => {
 
   const handleResetSmtp = async () => {
     setSmtpError(null);
+    setSmtpActionHint(null);
+    setSmtpDebugClues([]);
+    setSmtpFailedLogId(null);
     setSmtpNotice(null);
     try {
       const status = await resetSmtpConfig();
@@ -281,23 +300,46 @@ export const SettingsView: React.FC = () => {
 
   const handleSmtpConnectionTest = async () => {
     setSmtpError(null);
+    setSmtpActionHint(null);
+    setSmtpDebugClues([]);
+    setSmtpFailedLogId(null);
     setSmtpNotice(null);
     setTestingConnection(true);
     try {
-      const result = await testSmtpConnection({
+      const result = await checkSmtpConnection({
         host: smtpHost.trim(),
         port: Number(smtpPort) || 587,
         secure: smtpSecure,
         user: smtpUser.trim(),
         pass: smtpPass || undefined,
       });
-      setSmtpNotice(result.message);
-      showToast('success', 'SMTP Connection Test Passed', result.message);
+
+      if (result.ok) {
+        setSmtpNotice(result.message);
+        showToast('success', 'SMTP Connection Test Passed', result.message);
+        if (result.logEntryId) {
+          setExpandedLogIds((prev) => ({ ...prev, [result.logEntryId!]: true }));
+        }
+      } else {
+        setSmtpError(result.message);
+        setSmtpActionHint(result.actionHint || null);
+        setSmtpDebugClues(result.debuggingClues || []);
+        if (result.logEntryId) {
+          setSmtpFailedLogId(result.logEntryId);
+          setExpandedLogIds((prev) => ({ ...prev, [result.logEntryId!]: true }));
+        }
+        showToast(
+          'error',
+          `SMTP Handshake Failed${result.smtpErrorCode ? ` (${result.smtpErrorCode})` : ''}`,
+          result.actionHint ? `${result.message} Tip: ${result.actionHint}` : result.message
+        );
+      }
+      await refreshSmtpLogs();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'SMTP connection test failed.';
       setSmtpError(msg);
       showToast('error', 'SMTP Connection Test Failed', msg);
-      refreshSmtpLogs();
+      await refreshSmtpLogs();
     } finally {
       setTestingConnection(false);
     }
@@ -495,6 +537,7 @@ export const SettingsView: React.FC = () => {
                     {filteredLogs.map((log) => {
                       const hasTrace =
                         Boolean(log.handshakeTrace && log.handshakeTrace.length > 0) ||
+                        Boolean(log.debuggingClues && log.debuggingClues.length > 0) ||
                         Boolean(log.smtpRawResponse);
                       const isExpanded = Boolean(expandedLogIds[log.id]);
                       return (
@@ -613,7 +656,25 @@ export const SettingsView: React.FC = () => {
                           {isExpanded && hasTrace && (
                             <tr className="bg-[#F3F6FA]/70">
                               <td colSpan={5} className="px-4 py-3">
-                                <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2 text-[11px]">
+                                <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2.5 text-[11px]">
+                                  {log.actionHint && (
+                                    <div className="rounded border border-amber-200 bg-amber-50/70 px-3 py-2 text-amber-950">
+                                      <span className="font-semibold">Recommended Fix: </span>
+                                      {log.actionHint}
+                                    </div>
+                                  )}
+                                  {log.debuggingClues && log.debuggingClues.length > 0 && (
+                                    <div>
+                                      <div className="font-semibold text-[#14263D]">
+                                        Debugging Clues
+                                      </div>
+                                      <ul className="mt-1 list-disc pl-4 space-y-0.5 text-slate-700">
+                                        {log.debuggingClues.map((clue) => (
+                                          <li key={clue}>{clue}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
                                   {log.smtpRawResponse && (
                                     <div>
                                       <div className="font-semibold text-[#14263D]">
@@ -870,7 +931,36 @@ export const SettingsView: React.FC = () => {
             {smtpError && (
               <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-800">
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>{smtpError}</span>
+                <div className="space-y-1.5 flex-1">
+                  <div className="font-medium">{smtpError}</div>
+                  {smtpActionHint && (
+                    <div className="text-[11px] text-rose-900">
+                      <span className="font-semibold">Actionable Fix: </span>
+                      {smtpActionHint}
+                    </div>
+                  )}
+                  {smtpDebugClues.length > 0 && (
+                    <ul className="list-disc pl-4 space-y-0.5 text-[11px] text-rose-900/90">
+                      {smtpDebugClues.map((clue) => (
+                        <li key={clue}>{clue}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {smtpFailedLogId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setExpandedLogIds((prev) => ({ ...prev, [smtpFailedLogId]: true }));
+                        setLogStatusFilter('Failed');
+                        setActiveTab('smtp_logs');
+                      }}
+                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#14263D] underline hover:text-[#2463EB]"
+                    >
+                      <Terminal className="h-3 w-3" />
+                      Inspect Full Handshake Error in Activity Log
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 

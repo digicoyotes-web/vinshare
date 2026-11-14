@@ -9,6 +9,10 @@ import dotenv from 'dotenv';
 import express from 'express';
 import nodemailer from 'nodemailer';
 import { createServer as createViteServer } from 'vite';
+import {
+  buildSmtpDebuggingClues,
+  checkSmtpConnection,
+} from './src/services/smtp.ts';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -605,6 +609,8 @@ interface SmtpActivityRecord {
   smtpResponseCode?: number;
   smtpCommand?: string;
   smtpRawResponse?: string;
+  actionHint?: string;
+  debuggingClues?: string[];
   handshakeTrace?: string[];
   attachmentCount: number;
   timestamp: string;
@@ -612,15 +618,19 @@ interface SmtpActivityRecord {
 
 const smtpActivityLog: SmtpActivityRecord[] = [];
 
-function pushSmtpActivityLog(entry: Omit<SmtpActivityRecord, 'id' | 'timestamp'>) {
-  smtpActivityLog.unshift({
+function pushSmtpActivityLog(
+  entry: Omit<SmtpActivityRecord, 'id' | 'timestamp'>
+): SmtpActivityRecord {
+  const record: SmtpActivityRecord = {
     id: generateId('SMTP'),
     timestamp: new Date().toISOString(),
     ...entry,
-  });
+  };
+  smtpActivityLog.unshift(record);
   if (smtpActivityLog.length > 2000) {
     smtpActivityLog.length = 2000;
   }
+  return record;
 }
 
 function toLocalDateKey(date: Date): string {
@@ -865,7 +875,7 @@ function extractSmtpFailureDetails(
   const errorCode =
     typeof e.code === 'string' && e.code
       ? e.code
-      : raw.match(/\b(EAUTH|ECONNECTION|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|ESOCKET|EENVELOPE|EMESSAGE)\b/)?.[1];
+      : raw.match(/\b(EAUTH|ECONNECTION|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|ESOCKET|EENVELOPE|EMESSAGE|EAI_AGAIN)\b/)?.[1];
   const responseCode =
     typeof e.responseCode === 'number'
       ? e.responseCode
@@ -881,6 +891,15 @@ function extractSmtpFailureDetails(
   const rawResponse =
     typeof e.response === 'string' && e.response.trim() ? e.response.trim() : raw;
   const friendlyMessage = formatSmtpErrorMessage(err, host);
+  const { actionHint, debuggingClues } = buildSmtpDebuggingClues({
+    host,
+    port,
+    secure: port === 465,
+    errorCode,
+    responseCode,
+    command,
+    rawResponse,
+  });
 
   const normalizedTrace =
     trace.length > 0
@@ -893,8 +912,340 @@ function extractSmtpFailureDetails(
     smtpResponseCode: responseCode,
     smtpCommand: command,
     smtpRawResponse: rawResponse,
+    actionHint,
+    debuggingClues,
     handshakeTrace: normalizedTrace,
   };
+}
+
+export interface SmtpPingInput {
+  host: string;
+  port: number;
+  secure: boolean;
+  user?: string;
+  pass?: string;
+}
+
+export interface SmtpPingDeps {
+  tcpPingFn?: (host: string, port: number, secure: boolean) => Promise<{ ms: number; banner: string }>;
+  createTransporterFn?: (cfg: SmtpRuntimeConfig) => {
+    transporter: { verify: () => Promise<unknown> };
+    getTrace: () => string[];
+  };
+  logActivityFn?: (entry: Omit<SmtpActivityRecord, 'id' | 'timestamp'>) => SmtpActivityRecord;
+}
+
+export interface SmtpPingResult {
+  httpStatus: number;
+  body: {
+    ok: boolean;
+    mode?: 'full_handshake' | 'host_ping_only';
+    error?: string;
+    host: string;
+    port: number;
+    secure?: boolean;
+    latencyMs?: number;
+    tcpPingMs?: number;
+    banner?: string;
+    message: string;
+    smtpErrorCode?: string;
+    smtpResponseCode?: number;
+    smtpCommand?: string;
+    smtpRawResponse?: string;
+    actionHint?: string;
+    debuggingClues?: string[];
+    logEntryId?: string;
+  };
+}
+
+function defaultTcpPingAndBanner(
+  host: string,
+  port: number,
+  secure: boolean
+): Promise<{ ms: number; banner: string }> {
+  const startedAt = Date.now();
+  return new Promise<{ ms: number; banner: string }>((resolve, reject) => {
+    const socket = net.createConnection({ host, port });
+    let settled = false;
+    let connectMs = 0;
+
+    const overallTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (connectMs > 0) {
+        resolve({ ms: connectMs, banner: '' });
+      } else {
+        const err = new Error(`ETIMEDOUT: Connection to ${host}:${port} timed out after 6s`) as Error & {
+          code?: string;
+          command?: string;
+        };
+        err.code = 'ETIMEDOUT';
+        err.command = 'CONN';
+        reject(err);
+      }
+    }, 6000);
+
+    socket.once('connect', () => {
+      connectMs = Date.now() - startedAt;
+      if (secure || port === 465) {
+        settled = true;
+        clearTimeout(overallTimer);
+        socket.end();
+        resolve({ ms: connectMs, banner: '' });
+        return;
+      }
+      const bannerTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(overallTimer);
+        socket.end();
+        resolve({ ms: connectMs, banner: '' });
+      }, 1500);
+
+      socket.once('data', (chunk) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(bannerTimer);
+        clearTimeout(overallTimer);
+        const banner = chunk.toString('utf8').split(/\r?\n/)[0]?.trim() || '';
+        socket.end();
+        resolve({ ms: Date.now() - startedAt, banner });
+      });
+    });
+
+    socket.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(overallTimer);
+      socket.destroy();
+      reject(err);
+    });
+  });
+}
+
+export async function pingSmtpServer(
+  input: SmtpPingInput,
+  deps: SmtpPingDeps = {}
+): Promise<SmtpPingResult> {
+  const host = (input.host || '').trim();
+  const port = Number(input.port) || 587;
+  const secure = typeof input.secure === 'boolean' ? input.secure : port === 465;
+  const user = (input.user || '').trim();
+  const pass = normalizeSmtpPassword(host, input.pass || '');
+
+  const tcpPingFn = deps.tcpPingFn ?? defaultTcpPingAndBanner;
+  const createTransporterFn = deps.createTransporterFn ?? createTraceableSmtpTransporter;
+  const logActivityFn = deps.logActivityFn ?? pushSmtpActivityLog;
+
+  if (!isValidSmtpHost(host) || !isValidSmtpPort(port)) {
+    const actionHint =
+      'Enter a valid SMTP Host (e.g. smtp.gmail.com) and TCP Port between 1 and 65535 (e.g. 587 or 465).';
+    const logged = logActivityFn({
+      eventType: 'Connection Test',
+      to: user || host || 'Invalid Host',
+      from: user || 'Unconfigured',
+      subject: `SMTP Ping Validation (${host || 'missing'}:${port})`,
+      status: 'Failed',
+      smtpHost: host || undefined,
+      smtpPort: port,
+      errorMessage: 'Please enter a valid SMTP Host and Port (e.g. smtp.gmail.com:587).',
+      smtpErrorCode: 'INVALID_HOST',
+      smtpCommand: 'PREFLIGHT',
+      smtpRawResponse: `Rejected invalid host="${host}" port=${port} before TCP connect.`,
+      actionHint,
+      handshakeTrace: [
+        `[PREFLIGHT] Validating target host="${host}" port=${port}...`,
+        '[ERR] Invalid SMTP host or port.',
+      ],
+      attachmentCount: 0,
+    });
+    return {
+      httpStatus: 400,
+      body: {
+        ok: false,
+        error: 'INVALID_HOST',
+        host,
+        port,
+        message: 'Please enter a valid SMTP Host and Port (e.g. smtp.gmail.com:587).',
+        smtpErrorCode: 'INVALID_HOST',
+        smtpCommand: 'PREFLIGHT',
+        actionHint,
+        logEntryId: logged.id,
+      },
+    };
+  }
+
+  const startedAt = Date.now();
+  let tcpLatencyMs = 0;
+  let smtpBanner = '';
+
+  try {
+    const pingRes = await tcpPingFn(host, port, secure);
+    tcpLatencyMs = pingRes.ms;
+    smtpBanner = pingRes.banner;
+  } catch (err) {
+    const failure = extractSmtpFailureDetails(err, host, port, [
+      `TCP connect to ${host}:${port} (${secure ? 'SSL/TLS' : 'STARTTLS'})...`,
+      `[ERR] ${err instanceof Error ? err.message : String(err)}`,
+    ]);
+    const logged = logActivityFn({
+      eventType: 'Connection Test',
+      to: user || host,
+      from: user || 'Unconfigured',
+      subject: `SMTP TCP Ping (${host}:${port})`,
+      status: 'Failed',
+      smtpHost: host,
+      smtpPort: port,
+      errorMessage: failure.message,
+      smtpErrorCode: failure.smtpErrorCode || 'ECONNECTION',
+      smtpResponseCode: failure.smtpResponseCode,
+      smtpCommand: failure.smtpCommand || 'CONN',
+      smtpRawResponse: failure.smtpRawResponse,
+      actionHint: failure.actionHint,
+      debuggingClues: failure.debuggingClues,
+      handshakeTrace: failure.handshakeTrace,
+      attachmentCount: 0,
+    });
+    return {
+      httpStatus: 422,
+      body: {
+        ok: false,
+        error: 'SMTP_HOST_UNREACHABLE',
+        host,
+        port,
+        secure,
+        latencyMs: Date.now() - startedAt,
+        message: failure.message,
+        smtpErrorCode: failure.smtpErrorCode || 'ECONNECTION',
+        smtpResponseCode: failure.smtpResponseCode,
+        smtpCommand: failure.smtpCommand || 'CONN',
+        smtpRawResponse: failure.smtpRawResponse,
+        actionHint: failure.actionHint,
+        debuggingClues: failure.debuggingClues,
+        logEntryId: logged.id,
+      },
+    };
+  }
+
+  if (!user || !pass) {
+    const bannerNote = smtpBanner ? ` (${smtpBanner})` : '';
+    const trace = [
+      `TCP connect to ${host}:${port} (${secure ? 'SSL/TLS' : 'STARTTLS'}) succeeded in ${tcpLatencyMs} ms`,
+      ...(smtpBanner ? [`S: ${smtpBanner}`] : ['[TLS] Port open; awaiting SMTP credentials for AUTH handshake']),
+    ];
+    const logged = logActivityFn({
+      eventType: 'Connection Test',
+      to: host,
+      from: user || 'Ping Check',
+      subject: `SMTP Host Ping (${host}:${port})`,
+      status: 'Sent',
+      smtpHost: host,
+      smtpPort: port,
+      response: smtpBanner || `TCP open (${tcpLatencyMs} ms)`,
+      handshakeTrace: trace,
+      attachmentCount: 0,
+    });
+    return {
+      httpStatus: 200,
+      body: {
+        ok: true,
+        mode: 'host_ping_only',
+        host,
+        port,
+        secure,
+        latencyMs: tcpLatencyMs,
+        tcpPingMs: tcpLatencyMs,
+        banner: smtpBanner,
+        message: `SMTP host ${host}:${port} ping succeeded in ${tcpLatencyMs} ms${bannerNote}. Enter SMTP Username & Password / App Password to also verify login.`,
+        logEntryId: logged.id,
+      },
+    };
+  }
+
+  const { transporter, getTrace } = createTransporterFn({
+    host,
+    port,
+    secure,
+    user,
+    pass,
+    fromName: runtimeSmtpConfig.fromName,
+    fromEmail: user,
+    source: 'runtime',
+  });
+
+  try {
+    await transporter.verify();
+    const totalMs = Date.now() - startedAt;
+    const logged = logActivityFn({
+      eventType: 'Connection Test',
+      to: user,
+      from: user,
+      subject: `SMTP Handshake Ping (${host}:${port})`,
+      status: 'Sent',
+      smtpHost: host,
+      smtpPort: port,
+      response: `250 Handshake OK (${totalMs} ms)`,
+      handshakeTrace: getTrace(),
+      attachmentCount: 0,
+    });
+    return {
+      httpStatus: 200,
+      body: {
+        ok: true,
+        mode: 'full_handshake',
+        host,
+        port,
+        secure,
+        latencyMs: totalMs,
+        tcpPingMs: tcpLatencyMs,
+        banner: smtpBanner,
+        message: `SMTP connection verified for ${host}:${port} (${totalMs} ms round-trip, ping ${tcpLatencyMs} ms). Ready to send as ${user}.`,
+        logEntryId: logged.id,
+      },
+    };
+  } catch (err) {
+    const failure = extractSmtpFailureDetails(err, host, port, getTrace());
+    const logged = logActivityFn({
+      eventType: 'Connection Test',
+      to: user,
+      from: user,
+      subject: `SMTP Handshake Ping (${host}:${port})`,
+      status: 'Failed',
+      smtpHost: host,
+      smtpPort: port,
+      errorMessage: failure.message,
+      smtpErrorCode: failure.smtpErrorCode,
+      smtpResponseCode: failure.smtpResponseCode,
+      smtpCommand: failure.smtpCommand,
+      smtpRawResponse: failure.smtpRawResponse,
+      actionHint: failure.actionHint,
+      debuggingClues: failure.debuggingClues,
+      handshakeTrace: failure.handshakeTrace,
+      attachmentCount: 0,
+    });
+    return {
+      httpStatus: 422,
+      body: {
+        ok: false,
+        mode: 'full_handshake',
+        error: 'SMTP_AUTH_OR_TLS_FAILED',
+        host,
+        port,
+        secure,
+        latencyMs: Date.now() - startedAt,
+        tcpPingMs: tcpLatencyMs,
+        message: failure.message,
+        smtpErrorCode: failure.smtpErrorCode,
+        smtpResponseCode: failure.smtpResponseCode,
+        smtpCommand: failure.smtpCommand,
+        smtpRawResponse: failure.smtpRawResponse,
+        actionHint: failure.actionHint,
+        debuggingClues: failure.debuggingClues,
+        logEntryId: logged.id,
+      },
+    };
+  }
 }
 
 async function startServer() {
@@ -1399,9 +1750,40 @@ async function startServer() {
     const shouldVerify = body.verify !== false;
 
     if (!isValidSmtpHost(host) || !isValidSmtpPort(port) || !user || !pass) {
+      const clues = [
+        !isValidSmtpHost(host) ? `SMTP Host "${host || 'empty'}" is missing or invalid.` : `SMTP Host: ${host}`,
+        !isValidSmtpPort(port) ? `SMTP Port (${port}) must be between 1 and 65535.` : `SMTP Port: ${port}`,
+        !user ? 'SMTP Username / Email is empty.' : `SMTP Username: ${user}`,
+        !pass ? 'SMTP Password / App Password is missing.' : 'SMTP Password provided.',
+      ];
+      const actionHint =
+        'Fill in a valid SMTP Host (e.g. smtp.gmail.com), Port (587 STARTTLS or 465 SSL/TLS), Username/Email, and Password / 16-char Google App Password.';
+      const logged = pushSmtpActivityLog({
+        eventType: 'SMTP Verify',
+        to: user || host || 'Unconfigured',
+        from: fromEmail || user || 'Unconfigured',
+        subject: `SMTP Configuration Preflight (${host || 'missing'}:${port})`,
+        status: 'Failed',
+        smtpHost: host || undefined,
+        smtpPort: port,
+        errorMessage:
+          'Valid SMTP Host, Port (1–65535), SMTP Username/Email, and SMTP Password / App Password are required.',
+        smtpErrorCode: 'INVALID_SMTP_CONFIG',
+        smtpCommand: 'PREFLIGHT',
+        smtpRawResponse: clues.join(' | '),
+        actionHint,
+        debuggingClues: clues,
+        handshakeTrace: ['[PREFLIGHT] Validating SMTP configuration fields...', `[ERR] ${clues.join(' ')}`],
+        attachmentCount: 0,
+      });
       return res.status(400).json({
         error: 'INVALID_SMTP_CONFIG',
         message: 'Valid SMTP Host, Port (1–65535), SMTP Username/Email, and SMTP Password / App Password are required.',
+        smtpErrorCode: 'INVALID_SMTP_CONFIG',
+        smtpCommand: 'PREFLIGHT',
+        actionHint,
+        debuggingClues: clues,
+        logEntryId: logged.id,
       });
     }
 
@@ -1416,18 +1798,18 @@ async function startServer() {
       source: 'runtime',
     };
 
+    let verifyLogId: string | undefined;
     if (shouldVerify) {
-      const { transporter, getTrace } = createTraceableSmtpTransporter(candidate);
-      try {
-        await transporter.verify();
-      } catch (err) {
-        const failure = extractSmtpFailureDetails(
-          err,
-          candidate.host,
-          candidate.port,
-          getTrace()
-        );
-        pushSmtpActivityLog({
+      const checkResult = await checkSmtpConnection({
+        host: candidate.host,
+        port: candidate.port,
+        secure: candidate.secure,
+        user: candidate.user,
+        pass: candidate.pass,
+      });
+
+      if (!checkResult.ok) {
+        const logged = pushSmtpActivityLog({
           eventType: 'SMTP Verify',
           to: candidate.user,
           from: candidate.fromEmail,
@@ -1435,22 +1817,43 @@ async function startServer() {
           status: 'Failed',
           smtpHost: candidate.host,
           smtpPort: candidate.port,
-          errorMessage: failure.message,
-          smtpErrorCode: failure.smtpErrorCode,
-          smtpResponseCode: failure.smtpResponseCode,
-          smtpCommand: failure.smtpCommand,
-          smtpRawResponse: failure.smtpRawResponse,
-          handshakeTrace: failure.handshakeTrace,
+          errorMessage: checkResult.message,
+          smtpErrorCode: checkResult.smtpErrorCode,
+          smtpResponseCode: checkResult.smtpResponseCode,
+          smtpCommand: checkResult.smtpCommand,
+          smtpRawResponse: checkResult.smtpRawResponse,
+          actionHint: checkResult.actionHint,
+          debuggingClues: checkResult.debuggingClues,
+          handshakeTrace: checkResult.handshakeTrace,
           attachmentCount: 0,
         });
-        return res.status(502).json({
+        return res.status(422).json({
           error: 'SMTP_VERIFY_FAILED',
-          message: failure.message,
-          smtpErrorCode: failure.smtpErrorCode,
-          smtpResponseCode: failure.smtpResponseCode,
-          smtpCommand: failure.smtpCommand,
+          message: checkResult.message,
+          smtpErrorCode: checkResult.smtpErrorCode,
+          smtpResponseCode: checkResult.smtpResponseCode,
+          smtpCommand: checkResult.smtpCommand,
+          smtpRawResponse: checkResult.smtpRawResponse,
+          actionHint: checkResult.actionHint,
+          debuggingClues: checkResult.debuggingClues,
+          logEntryId: logged.id,
         });
       }
+
+      const loggedSuccess = pushSmtpActivityLog({
+        eventType: 'SMTP Verify',
+        to: candidate.user,
+        from: candidate.fromEmail,
+        subject: `SMTP Handshake Verification (${candidate.host}:${candidate.port})`,
+        status: 'Sent',
+        smtpHost: candidate.host,
+        smtpPort: candidate.port,
+        response: `250 Verified (${checkResult.latencyMs} ms)`,
+        debuggingClues: checkResult.debuggingClues,
+        handshakeTrace: checkResult.handshakeTrace,
+        attachmentCount: 0,
+      });
+      verifyLogId = loggedSuccess.id;
     }
 
     runtimeSmtpConfig = candidate;
@@ -1460,6 +1863,7 @@ async function startServer() {
       ok: true,
       configured: true,
       verified: shouldVerify,
+      logEntryId: verifyLogId,
       source: runtimeSmtpConfig.source,
       host: runtimeSmtpConfig.host,
       port: runtimeSmtpConfig.port,
@@ -1472,7 +1876,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/email/smtp-test', async (req, res) => {
+  app.post('/api/email/smtp-verify', async (req, res) => {
     const body = req.body ?? {};
     const host = String(body.host ?? runtimeSmtpConfig.host).trim();
     const port = Number(body.port ?? runtimeSmtpConfig.port) || 587;
@@ -1480,179 +1884,64 @@ async function startServer() {
       typeof body.secure === 'boolean' ? body.secure : port === 465;
     const user = String(body.user ?? runtimeSmtpConfig.user).trim();
     const incomingPass = typeof body.pass === 'string' ? body.pass : '';
-    const pass = normalizeSmtpPassword(
-      host,
-      incomingPass ? incomingPass : runtimeSmtpConfig.pass
-    );
+    const pass = incomingPass ? incomingPass : runtimeSmtpConfig.pass;
 
-    if (!isValidSmtpHost(host) || !isValidSmtpPort(port)) {
-      return res.status(400).json({
-        ok: false,
-        error: 'INVALID_HOST',
-        message: 'Please enter a valid SMTP Host and Port (e.g. smtp.gmail.com:587).',
-      });
-    }
-
-    const startedAt = Date.now();
-
-    const pingTcpAndBanner = () =>
-      new Promise<{ ms: number; banner: string }>((resolve, reject) => {
-        const socket = net.createConnection({ host, port });
-        let settled = false;
-        let connectMs = 0;
-
-        const overallTimer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          socket.destroy();
-          if (connectMs > 0) {
-            resolve({ ms: connectMs, banner: '' });
-          } else {
-            reject(new Error(`ETIMEDOUT: Connection to ${host}:${port} timed out after 6s`));
-          }
-        }, 6000);
-
-        socket.once('connect', () => {
-          connectMs = Date.now() - startedAt;
-          if (secure || port === 465) {
-            settled = true;
-            clearTimeout(overallTimer);
-            socket.end();
-            resolve({ ms: connectMs, banner: '' });
-            return;
-          }
-          const bannerTimer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(overallTimer);
-            socket.end();
-            resolve({ ms: connectMs, banner: '' });
-          }, 1500);
-
-          socket.once('data', (chunk) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(bannerTimer);
-            clearTimeout(overallTimer);
-            const banner = chunk.toString('utf8').split(/\r?\n/)[0]?.trim() || '';
-            socket.end();
-            resolve({ ms: Date.now() - startedAt, banner });
-          });
-        });
-
-        socket.once('error', (err) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(overallTimer);
-          socket.destroy();
-          reject(err);
-        });
-      });
-
-    let tcpLatencyMs = 0;
-    let smtpBanner = '';
-    try {
-      const pingRes = await pingTcpAndBanner();
-      tcpLatencyMs = pingRes.ms;
-      smtpBanner = pingRes.banner;
-    } catch (err) {
-      const failure = extractSmtpFailureDetails(err, host, port, [
-        `TCP connect to ${host}:${port} (${secure ? 'SSL/TLS' : 'STARTTLS'})...`,
-        `[ERR] ${err instanceof Error ? err.message : String(err)}`,
-      ]);
-      pushSmtpActivityLog({
-        eventType: 'Connection Test',
-        to: user || host,
-        from: user || 'Unconfigured',
-        subject: `SMTP TCP Ping (${host}:${port})`,
-        status: 'Failed',
-        smtpHost: host,
-        smtpPort: port,
-        errorMessage: failure.message,
-        smtpErrorCode: failure.smtpErrorCode || 'ECONNECTION',
-        smtpCommand: failure.smtpCommand || 'CONN',
-        smtpRawResponse: failure.smtpRawResponse,
-        handshakeTrace: failure.handshakeTrace,
-        attachmentCount: 0,
-      });
-      return res.status(502).json({
-        ok: false,
-        error: 'SMTP_HOST_UNREACHABLE',
-        host,
-        port,
-        latencyMs: Date.now() - startedAt,
-        message: failure.message,
-      });
-    }
-
-    if (!user || !pass) {
-      const bannerNote = smtpBanner ? ` (${smtpBanner})` : '';
-      return res.json({
-        ok: true,
-        mode: 'host_ping_only',
-        host,
-        port,
-        secure,
-        latencyMs: tcpLatencyMs,
-        tcpPingMs: tcpLatencyMs,
-        message: `SMTP host ${host}:${port} ping succeeded in ${tcpLatencyMs} ms${bannerNote}. Enter SMTP Username & Password / App Password to also verify login.`,
-      });
-    }
-
-    const { transporter, getTrace } = createTraceableSmtpTransporter({
+    const result = await checkSmtpConnection({
       host,
       port,
       secure,
       user,
       pass,
-      fromName: runtimeSmtpConfig.fromName,
-      fromEmail: user,
-      source: 'runtime',
     });
 
-    try {
-      await transporter.verify();
-      const totalMs = Date.now() - startedAt;
-      return res.json({
-        ok: true,
-        mode: 'full_handshake',
-        host,
-        port,
-        secure,
-        latencyMs: totalMs,
-        tcpPingMs: tcpLatencyMs,
-        message: `SMTP connection verified for ${host}:${port} (${totalMs} ms round-trip, ping ${tcpLatencyMs} ms). Ready to send as ${user}.`,
-      });
-    } catch (err) {
-      const failure = extractSmtpFailureDetails(err, host, port, getTrace());
-      pushSmtpActivityLog({
-        eventType: 'Connection Test',
-        to: user,
-        from: user,
-        subject: `SMTP Handshake Test (${host}:${port})`,
-        status: 'Failed',
-        smtpHost: host,
-        smtpPort: port,
-        errorMessage: failure.message,
-        smtpErrorCode: failure.smtpErrorCode,
-        smtpResponseCode: failure.smtpResponseCode,
-        smtpCommand: failure.smtpCommand,
-        smtpRawResponse: failure.smtpRawResponse,
-        handshakeTrace: failure.handshakeTrace,
-        attachmentCount: 0,
-      });
-      return res.status(502).json({
-        ok: false,
-        mode: 'full_handshake',
-        error: 'SMTP_AUTH_OR_TLS_FAILED',
-        host,
-        port,
-        latencyMs: Date.now() - startedAt,
-        tcpPingMs: tcpLatencyMs,
-        message: failure.message,
-      });
-    }
+    const logged = pushSmtpActivityLog({
+      eventType: 'Connection Test',
+      to: user || host || 'Unconfigured',
+      from: user || 'SMTP Verify',
+      subject: `Nodemailer verify() (${host || 'missing'}:${port})`,
+      status: result.ok ? 'Sent' : 'Failed',
+      smtpHost: host || undefined,
+      smtpPort: port,
+      response: result.ok ? `250 Handshake OK (${result.latencyMs} ms)` : undefined,
+      errorMessage: result.ok ? undefined : result.message,
+      smtpErrorCode: result.smtpErrorCode,
+      smtpResponseCode: result.smtpResponseCode,
+      smtpCommand: result.smtpCommand,
+      smtpRawResponse: result.smtpRawResponse,
+      actionHint: result.actionHint,
+      debuggingClues: result.debuggingClues,
+      handshakeTrace: result.handshakeTrace,
+      attachmentCount: 0,
+    });
+
+    return res.status(result.ok ? 200 : 422).json({
+      ...result,
+      logEntryId: logged.id,
+    });
   });
+
+  const handleSmtpPingRoute = async (req: express.Request, res: express.Response) => {
+    const body = req.body ?? {};
+    const host = String(body.host ?? runtimeSmtpConfig.host).trim();
+    const port = Number(body.port ?? runtimeSmtpConfig.port) || 587;
+    const secure =
+      typeof body.secure === 'boolean' ? body.secure : port === 465;
+    const user = String(body.user ?? runtimeSmtpConfig.user).trim();
+    const incomingPass = typeof body.pass === 'string' ? body.pass : '';
+    const pass = incomingPass ? incomingPass : runtimeSmtpConfig.pass;
+
+    const result = await pingSmtpServer({
+      host,
+      port,
+      secure,
+      user,
+      pass,
+    });
+    return res.status(result.httpStatus).json(result.body);
+  };
+
+  app.post('/api/email/smtp-ping', handleSmtpPingRoute);
+  app.post('/api/email/smtp-test', handleSmtpPingRoute);
 
   app.post('/api/email/smtp-reset', (_req, res) => {
     clearPersistedSmtpConfig();
@@ -1799,15 +2088,19 @@ async function startServer() {
         smtpResponseCode: failure.smtpResponseCode,
         smtpCommand: failure.smtpCommand,
         smtpRawResponse: failure.smtpRawResponse,
+        actionHint: failure.actionHint,
+        debuggingClues: failure.debuggingClues,
         handshakeTrace: failure.handshakeTrace,
         attachmentCount: attachments.length,
       });
-      return res.status(502).json({
+      return res.status(422).json({
         error: 'SMTP_SEND_FAILED',
         message: failure.message,
         smtpErrorCode: failure.smtpErrorCode,
         smtpResponseCode: failure.smtpResponseCode,
         smtpCommand: failure.smtpCommand,
+        actionHint: failure.actionHint,
+        debuggingClues: failure.debuggingClues,
       });
     }
   });
