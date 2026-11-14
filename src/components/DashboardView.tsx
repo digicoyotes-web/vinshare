@@ -27,6 +27,7 @@ import type {
   SmsVerificationStats,
 } from '../types/erp';
 import { formatInrCompact } from '../utils/formatters';
+import { DashboardQrWidget } from './DashboardQrWidget';
 
 interface DashboardViewProps {
   userName: string;
@@ -38,6 +39,7 @@ interface DashboardViewProps {
   invoices: InvoiceRecord[];
   smsStats: SmsVerificationStats;
   onNavigate: (tab: NavModuleId) => void;
+  onOpenProjectSite: (projectId: string) => void;
   onOpenSmsInbox: () => void;
 }
 
@@ -51,6 +53,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   invoices,
   smsStats,
   onNavigate,
+  onOpenProjectSite,
   onOpenSmsInbox,
 }) => {
   const [periodFilter, setPeriodFilter] = useState<'month' | 'quarter' | 'fy'>('month');
@@ -648,6 +651,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Site-Specific Quick-Access Field QR Portal */}
+      <DashboardQrWidget projects={projects} onOpenSitePortal={onOpenProjectSite} />
     </div>
   );
 };

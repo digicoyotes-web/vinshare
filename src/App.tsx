@@ -169,6 +169,7 @@ const NAV_ITEMS: Array<{ id: NavModuleId; label: string; icon: React.FC<{ classN
 
 export default function App() {
   const [activeNav, setActiveNav] = useState<NavModuleId>('dashboard');
+  const [focusProjectId, setFocusProjectId] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -299,6 +300,27 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  // Support direct QR scan deep-links (?portal=site&project=CODE)
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('portal') === 'site') {
+        const projectCode = params.get('project');
+        if (projectCode) {
+          const matched = projects.find(
+            (p) => p.code.toLowerCase() === projectCode.toLowerCase() || p.id === projectCode
+          );
+          if (matched) {
+            setFocusProjectId(matched.id);
+          }
+        }
+        setActiveNav('projects');
+      }
+    } catch {
+      // Ignore query parse issues
+    }
+  }, [projects]);
 
   const activeUser = useMemo(
     () => users.find((u) => u.id === activeUserId) || users[0],
@@ -1088,6 +1110,10 @@ export default function App() {
               invoices={invoices}
               smsStats={smsStats}
               onNavigate={setActiveNav}
+              onOpenProjectSite={(projectId) => {
+                setFocusProjectId(projectId);
+                setActiveNav('projects');
+              }}
               onOpenSmsInbox={() => openSmsInbox()}
             />
           )}
@@ -1172,6 +1198,7 @@ export default function App() {
             <ProjectsHandoverView
               clients={clients}
               projects={projects}
+              initialProjectId={focusProjectId}
               projectSnapshots={docSnapshots.filter((s) => s.entityType === 'project')}
               emails={projectEmails}
               onToggleChecklist={handleToggleChecklist}

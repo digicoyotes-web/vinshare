@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Briefcase, CheckCircle2, ClipboardCheck, ShieldCheck } from 'lucide-react';
 import type {
   ClientRecord,
@@ -17,6 +17,7 @@ import { VersionsModal } from './VersionsModal';
 interface ProjectsHandoverViewProps {
   clients: ClientRecord[];
   projects: ProjectRecord[];
+  initialProjectId?: string;
   projectSnapshots: DocumentVersionSnapshot[];
   emails: ProjectEmailRecord[];
   onToggleChecklist: (projectId: string, itemId: string) => void;
@@ -31,6 +32,7 @@ interface ProjectsHandoverViewProps {
 export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
   clients,
   projects,
+  initialProjectId,
   projectSnapshots,
   emails,
   onToggleChecklist,
@@ -41,9 +43,15 @@ export const ProjectsHandoverView: React.FC<ProjectsHandoverViewProps> = ({
   onOpenFullEmailHub,
   onGenerateInvoiceForProject,
 }) => {
-  const [selectedId, setSelectedId] = useState(projects[0]?.id || '');
+  const [selectedId, setSelectedId] = useState(initialProjectId || projects[0]?.id || '');
   const [showVersionsModal, setShowVersionsModal] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialProjectId && projects.some((p) => p.id === initialProjectId)) {
+      setSelectedId(initialProjectId);
+    }
+  }, [initialProjectId, projects]);
 
   const active = projects.find((p) => p.id === selectedId) || projects[0];
 
