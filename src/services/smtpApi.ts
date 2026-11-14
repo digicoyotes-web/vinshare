@@ -1,3 +1,12 @@
+export interface SmtpEnvDiagnostics {
+  detectedVars: string[];
+  issues: string[];
+  parsedHost: string;
+  parsedPort: number;
+  parsedUser: string;
+  hasEnvPassword: boolean;
+}
+
 export interface SmtpStatusDto {
   configured: boolean;
   source: 'env' | 'runtime';
@@ -8,6 +17,7 @@ export interface SmtpStatusDto {
   hasPassword: boolean;
   fromName: string;
   fromEmail: string;
+  envDiagnostics?: SmtpEnvDiagnostics;
 }
 
 export interface SmtpConfigInput {
@@ -160,6 +170,7 @@ export async function sendEmailViaSmtp(
 
 export interface SmtpActivityLogEntry {
   id: string;
+  eventType?: 'Send Email' | 'SMTP Verify' | 'Connection Test';
   to: string;
   cc?: string;
   from: string;
@@ -167,8 +178,14 @@ export interface SmtpActivityLogEntry {
   status: 'Sent' | 'Failed';
   messageId?: string;
   smtpHost?: string;
+  smtpPort?: number;
   response?: string;
   errorMessage?: string;
+  smtpErrorCode?: string;
+  smtpResponseCode?: number;
+  smtpCommand?: string;
+  smtpRawResponse?: string;
+  handshakeTrace?: string[];
   attachmentCount: number;
   timestamp: string;
 }

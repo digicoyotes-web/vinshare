@@ -113,6 +113,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const [smtpSaveNotice, setSmtpSaveNotice] = useState<string | null>(null);
 
   const [confirmStep, setConfirmStep] = useState(false);
+  const [verifyingBeforeReview, setVerifyingBeforeReview] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [sentResult, setSentResult] = useState<{
@@ -318,17 +319,56 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     return true;
   };
 
-  const handleReviewBeforeSend = (e: React.FormEvent) => {
+  const handleReviewBeforeSend = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     if (!validateFields()) return;
-    if (!smtpStatus?.configured) {
-      setSmtpConfigOpen(true);
-      setErrorMsg(
-        'SMTP mail server is not configured yet. Enter your SMTP Host, Username, and Password / App Password above and click "Verify & Save SMTP".'
-      );
+
+    const hasInlineCredentials = Boolean(
+      smtpHost.trim() &&
+        smtpUser.trim() &&
+        (smtpPass.trim() || smtpStatus?.hasPassword)
+    );
+
+    if (!smtpStatus?.configured || (smtpConfigOpen && smtpPass.trim())) {
+      if (!hasInlineCredentials) {
+        setSmtpConfigOpen(true);
+        setErrorMsg(
+          'Enter your SMTP Username / Email and Password / App Password in the SMTP Server Settings section above before sending.'
+        );
+        return;
+      }
+
+      setVerifyingBeforeReview(true);
+      try {
+        const updated = await saveAndVerifySmtpConfig({
+          host: smtpHost.trim(),
+          port: Number(smtpPort) || 587,
+          secure: smtpSecure,
+          user: smtpUser.trim(),
+          pass: smtpPass || undefined,
+          fromName: smtpFromName.trim() || 'Vinshar Facility Management ERP',
+          fromEmail: (smtpFromEmail || smtpUser).trim(),
+          verify: true,
+        });
+        setSmtpStatus(updated);
+        setSmtpPass('');
+        setSmtpConfigOpen(false);
+        setSmtpSaveNotice(
+          `SMTP verified & connected (${updated.host}:${updated.port} as ${updated.fromEmail}).`
+        );
+        setConfirmStep(true);
+      } catch (err) {
+        setSmtpConfigOpen(true);
+        setErrorMsg(
+          err instanceof Error ? err.message : 'SMTP verification failed.'
+        );
+      } finally {
+        setVerifyingBeforeReview(false);
+      }
       return;
     }
+
     setConfirmStep(true);
   };
 
@@ -1104,10 +1144,20 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                 )}
                 <button
                   type="submit"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+                  disabled={verifyingBeforeReview || smtpSaving || smtpLoading}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#2463EB] px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
                 >
-                  <Send className="h-3.5 w-3.5" />
-                  Review & Send via SMTP
+                  {verifyingBeforeReview ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Verifying SMTP...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="h-3.5 w-3.5" />
+                      Review & Send via SMTP
+                    </>
+                  )}
                 </button>
               </div>
             </div>

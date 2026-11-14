@@ -3,6 +3,8 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   History,
   Loader2,
   Mail,
@@ -13,6 +15,7 @@ import {
   Server,
   Settings,
   ShieldCheck,
+  Terminal,
   X,
 } from 'lucide-react';
 import { INDUSTRY_TEMPLATES, SERVICE_MASTER } from '../data/seedData';
@@ -25,6 +28,7 @@ import {
   sendEmailViaSmtp,
   testSmtpConnection,
   type SmtpActivityLogEntry,
+  type SmtpEnvDiagnostics,
   type SmtpMetrics30Days,
 } from '../services/smtpApi';
 import { SmtpActivityMetrics } from './SmtpActivityMetrics';
@@ -48,6 +52,8 @@ export const SettingsView: React.FC = () => {
 
   // SMTP Configuration State
   const [smtpConfigured, setSmtpConfigured] = useState(false);
+  const [smtpSource, setSmtpSource] = useState<'env' | 'runtime'>('env');
+  const [smtpEnvDiagnostics, setSmtpEnvDiagnostics] = useState<SmtpEnvDiagnostics | null>(null);
   const [smtpHost, setSmtpHost] = useState('smtp.gmail.com');
   const [smtpPort, setSmtpPort] = useState(587);
   const [smtpSecure, setSmtpSecure] = useState(false);
@@ -71,6 +77,7 @@ export const SettingsView: React.FC = () => {
   const [logsError, setLogsError] = useState<string | null>(null);
   const [logStatusFilter, setLogStatusFilter] = useState<'all' | 'Sent' | 'Failed'>('all');
   const [logSearchQuery, setLogSearchQuery] = useState('');
+  const [expandedLogIds, setExpandedLogIds] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<{
     id: number;
     type: 'success' | 'error';
@@ -119,19 +126,34 @@ export const SettingsView: React.FC = () => {
   }, [smtpLogs, logStatusFilter, logSearchQuery]);
 
   useEffect(() => {
+    const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env || {};
+    const viteHost = (viteEnv.VITE_SMTP_HOST || '').trim();
+    const vitePort = Number(viteEnv.VITE_SMTP_PORT);
+    const viteUser = (viteEnv.VITE_SMTP_USER || '').trim();
+    const viteFromName = (viteEnv.VITE_SMTP_FROM_NAME || '').trim();
+    const viteFromEmail = (viteEnv.VITE_SMTP_FROM_EMAIL || '').trim();
+
     fetchSmtpStatus()
       .then((status) => {
         setSmtpConfigured(status.configured);
-        setSmtpHost(status.host || 'smtp.gmail.com');
-        setSmtpPort(status.port || 587);
+        setSmtpSource(status.source);
+        setSmtpEnvDiagnostics(status.envDiagnostics || null);
+        setSmtpHost(status.host || viteHost || 'smtp.gmail.com');
+        setSmtpPort(
+          status.port || (Number.isInteger(vitePort) && vitePort > 0 && vitePort <= 65535 ? vitePort : 587)
+        );
         setSmtpSecure(status.secure);
-        setSmtpUser(status.user || '');
+        setSmtpUser(status.user || viteUser || '');
         setSmtpHasPass(status.hasPassword);
-        setSmtpFromName(status.fromName || 'Vinshar Facility Management ERP');
-        setSmtpFromEmail(status.fromEmail || status.user || '');
+        setSmtpFromName(status.fromName || viteFromName || 'Vinshar Facility Management ERP');
+        setSmtpFromEmail(status.fromEmail || status.user || viteFromEmail || viteUser || '');
       })
       .catch(() => {
-        // Ignore initial status error
+        if (viteHost) setSmtpHost(viteHost);
+        if (Number.isInteger(vitePort) && vitePort > 0 && vitePort <= 65535) setSmtpPort(vitePort);
+        if (viteUser) setSmtpUser(viteUser);
+        if (viteFromName) setSmtpFromName(viteFromName);
+        if (viteFromEmail || viteUser) setSmtpFromEmail(viteFromEmail || viteUser);
       });
     refreshSmtpLogs();
   }, [refreshSmtpLogs]);
@@ -193,13 +215,17 @@ export const SettingsView: React.FC = () => {
         verify: true,
       });
       setSmtpConfigured(updated.configured);
+      setSmtpSource(updated.source);
+      setSmtpEnvDiagnostics(updated.envDiagnostics || null);
       setSmtpHasPass(updated.hasPassword);
       setSmtpPass('');
       setSmtpNotice(
         `SMTP handshake verified! Outbound ERP emails will send via ${updated.host}:${updated.port} from ${updated.fromEmail}.`
       );
+      refreshSmtpLogs();
     } catch (err) {
       setSmtpError(err instanceof Error ? err.message : 'SMTP verification failed.');
+      refreshSmtpLogs();
     } finally {
       setSmtpSaving(false);
     }
@@ -237,6 +263,8 @@ export const SettingsView: React.FC = () => {
     try {
       const status = await resetSmtpConfig();
       setSmtpConfigured(status.configured);
+      setSmtpSource(status.source);
+      setSmtpEnvDiagnostics(status.envDiagnostics || null);
       setSmtpHost(status.host || 'smtp.gmail.com');
       setSmtpPort(status.port || 587);
       setSmtpSecure(status.secure);
@@ -269,9 +297,14 @@ export const SettingsView: React.FC = () => {
       const msg = err instanceof Error ? err.message : 'SMTP connection test failed.';
       setSmtpError(msg);
       showToast('error', 'SMTP Connection Test Failed', msg);
+      refreshSmtpLogs();
     } finally {
       setTestingConnection(false);
     }
+  };
+
+  const toggleLogTrace = (id: string) => {
+    setExpandedLogIds((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
   return (
@@ -459,65 +492,155 @@ export const SettingsView: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs">
-                    {filteredLogs.map((log) => (
-                      <tr key={log.id} className="hover:bg-[#F3F6FA]/60">
-                        <td className="px-4 py-3 font-mono text-[11px] text-slate-600 whitespace-nowrap tabular-nums">
-                          {new Date(log.timestamp).toLocaleString('en-IN')}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="font-mono font-semibold text-[#14263D]">{log.to}</div>
-                          {log.cc && (
-                            <div className="font-mono text-[11px] text-slate-500">CC: {log.cc}</div>
-                          )}
-                          <div className="font-mono text-[11px] text-slate-400">From: {log.from}</div>
-                        </td>
-                        <td className="px-4 py-3 max-w-xs">
-                          <div className="font-medium text-[#14263D] truncate" title={log.subject}>
-                            {log.subject}
-                          </div>
-                          {log.attachmentCount > 0 && (
-                            <div className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-slate-500">
-                              <Paperclip className="h-3 w-3 text-[#2463EB]" />
-                              {log.attachmentCount} PDF attachment(s)
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap">
-                          <span
-                            className={`inline-flex items-center gap-1.5 text-xs font-semibold ${
-                              log.status === 'Sent'
-                                ? 'text-[#16A34A]'
-                                : 'text-[#DC2626]'
-                            }`}
-                          >
-                            {log.status === 'Sent' ? (
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                            ) : (
-                              <AlertCircle className="h-3.5 w-3.5" />
-                            )}
-                            {log.status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-[11px] text-slate-600 max-w-xs">
-                          {log.status === 'Sent' ? (
-                            <div className="space-y-0.5">
-                              {log.smtpHost && (
-                                <div className="font-mono text-[#14263D]">{log.smtpHost}</div>
+                    {filteredLogs.map((log) => {
+                      const hasTrace =
+                        Boolean(log.handshakeTrace && log.handshakeTrace.length > 0) ||
+                        Boolean(log.smtpRawResponse);
+                      const isExpanded = Boolean(expandedLogIds[log.id]);
+                      return (
+                        <React.Fragment key={log.id}>
+                          <tr className="hover:bg-[#F3F6FA]/60 align-top">
+                            <td className="px-4 py-3 font-mono text-[11px] text-slate-600 whitespace-nowrap tabular-nums">
+                              <div>{new Date(log.timestamp).toLocaleString('en-IN')}</div>
+                              <div className="mt-0.5 font-sans text-[11px] text-slate-400">
+                                {log.eventType || 'Send Email'}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="font-mono font-semibold text-[#14263D]">{log.to}</div>
+                              {log.cc && (
+                                <div className="font-mono text-[11px] text-slate-500">CC: {log.cc}</div>
                               )}
-                              {log.messageId && (
-                                <div className="font-mono text-[11px] text-slate-500 truncate" title={log.messageId}>
-                                  ID: {log.messageId}
+                              <div className="font-mono text-[11px] text-slate-400">From: {log.from}</div>
+                            </td>
+                            <td className="px-4 py-3 max-w-xs">
+                              <div className="font-medium text-[#14263D] truncate" title={log.subject}>
+                                {log.subject}
+                              </div>
+                              {log.attachmentCount > 0 && (
+                                <div className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-slate-500">
+                                  <Paperclip className="h-3 w-3 text-[#2463EB]" />
+                                  {log.attachmentCount} PDF attachment(s)
                                 </div>
                               )}
-                            </div>
-                          ) : (
-                            <div className="text-[#DC2626] leading-snug">
-                              {log.errorMessage || 'SMTP dispatch failed'}
-                            </div>
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <span
+                                className={`inline-flex items-center gap-1.5 text-xs font-semibold ${
+                                  log.status === 'Sent'
+                                    ? 'text-[#16A34A]'
+                                    : 'text-[#DC2626]'
+                                }`}
+                              >
+                                {log.status === 'Sent' ? (
+                                  <CheckCircle2 className="h-3.5 w-3.5" />
+                                ) : (
+                                  <AlertCircle className="h-3.5 w-3.5" />
+                                )}
+                                {log.status}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-[11px] text-slate-600 max-w-sm">
+                              {log.status === 'Sent' ? (
+                                <div className="space-y-0.5">
+                                  {log.smtpHost && (
+                                    <div className="font-mono text-[#14263D]">
+                                      {log.smtpHost}
+                                      {log.smtpPort ? `:${log.smtpPort}` : ''}
+                                    </div>
+                                  )}
+                                  {log.messageId && (
+                                    <div className="font-mono text-[11px] text-slate-500 truncate" title={log.messageId}>
+                                      ID: {log.messageId}
+                                    </div>
+                                  )}
+                                  {hasTrace && (
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleLogTrace(log.id)}
+                                      className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-[#2463EB] hover:underline"
+                                    >
+                                      <Terminal className="h-3 w-3" />
+                                      {isExpanded ? 'Hide Handshake Trace' : 'View Handshake Trace'}
+                                      {isExpanded ? (
+                                        <ChevronUp className="h-3 w-3" />
+                                      ) : (
+                                        <ChevronDown className="h-3 w-3" />
+                                      )}
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  {(log.smtpCommand || log.smtpErrorCode || log.smtpResponseCode) && (
+                                    <div className="font-mono text-[11px] text-slate-600">
+                                      {[
+                                        log.smtpHost
+                                          ? `${log.smtpHost}${log.smtpPort ? `:${log.smtpPort}` : ''}`
+                                          : null,
+                                        log.smtpCommand ? `Stage: ${log.smtpCommand}` : null,
+                                        log.smtpErrorCode ? `Code: ${log.smtpErrorCode}` : null,
+                                        log.smtpResponseCode ? `SMTP ${log.smtpResponseCode}` : null,
+                                      ]
+                                        .filter(Boolean)
+                                        .join(' · ')}
+                                    </div>
+                                  )}
+                                  <div className="text-[#DC2626] leading-snug">
+                                    {log.errorMessage || 'SMTP dispatch failed'}
+                                  </div>
+                                  {hasTrace && (
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleLogTrace(log.id)}
+                                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#14263D] hover:text-[#2463EB]"
+                                    >
+                                      <Terminal className="h-3 w-3" />
+                                      {isExpanded
+                                        ? 'Hide Server Handshake Error Details'
+                                        : 'Inspect Server Handshake Trace'}
+                                      {isExpanded ? (
+                                        <ChevronUp className="h-3 w-3" />
+                                      ) : (
+                                        <ChevronDown className="h-3 w-3" />
+                                      )}
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                          {isExpanded && hasTrace && (
+                            <tr className="bg-[#F3F6FA]/70">
+                              <td colSpan={5} className="px-4 py-3">
+                                <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2 text-[11px]">
+                                  {log.smtpRawResponse && (
+                                    <div>
+                                      <div className="font-semibold text-[#14263D]">
+                                        Verbatim SMTP Server Response
+                                      </div>
+                                      <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] text-[#DC2626] bg-rose-50/60 border border-rose-100 rounded px-2.5 py-2">
+                                        {log.smtpRawResponse}
+                                      </pre>
+                                    </div>
+                                  )}
+                                  {log.handshakeTrace && log.handshakeTrace.length > 0 && (
+                                    <div>
+                                      <div className="font-semibold text-[#14263D]">
+                                        SMTP Protocol Exchange (Credentials Redacted)
+                                      </div>
+                                      <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-slate-700 bg-[#F3F6FA] border border-slate-200 rounded px-2.5 py-2 leading-relaxed">
+                                        {log.handshakeTrace.join('\n')}
+                                      </pre>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
                           )}
-                        </td>
-                      </tr>
-                    ))}
+                        </React.Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -673,6 +796,31 @@ export const SettingsView: React.FC = () => {
               >
                 {smtpConfigured ? 'Verified & Active' : 'Not Configured'}
               </span>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-[#F3F6FA] px-3 py-2.5 text-[11px] space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-[#14263D]">
+                  Active Source:{' '}
+                  {smtpSource === 'runtime'
+                    ? 'Verified Runtime Settings'
+                    : smtpConfigured
+                      ? 'Environment Variables (.env / Secrets)'
+                      : 'Default Template (Credentials Needed)'}
+                </span>
+                <span className="font-mono text-slate-500">
+                  {smtpEnvDiagnostics?.detectedVars.length
+                    ? `Env keys: ${smtpEnvDiagnostics.detectedVars.join(', ')}`
+                    : 'No SMTP_* env vars detected'}
+                </span>
+              </div>
+              {smtpEnvDiagnostics && smtpEnvDiagnostics.issues.length > 0 && (
+                <div className="pt-1 text-[#DC2626] space-y-0.5">
+                  {smtpEnvDiagnostics.issues.map((issue) => (
+                    <div key={issue}>• {issue}</div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5">
