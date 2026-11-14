@@ -471,6 +471,7 @@ function parseEnvSmtpState(): {
   const isDummyPass =
     !passEntry.value ||
     passEntry.value === 'your-smtp-app-password' ||
+    passEntry.value === '1234567890' ||
     (passEntry.value === '123456790' && rawHost === '123456790');
   const validPass = !isDummyPass;
 

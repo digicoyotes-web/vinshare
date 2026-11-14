@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronUp,
   Download,
+  ExternalLink,
   Eye,
   EyeOff,
   FileText,
@@ -23,7 +24,9 @@ import {
   X,
 } from 'lucide-react';
 import {
+  buildMailtoFallbackHref,
   fetchSmtpStatus,
+  getDevelopmentBackendUrl,
   saveAndVerifySmtpConfig,
   sendEmailViaSmtp,
   SmtpConnectionError,
@@ -122,6 +125,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [errorHint, setErrorHint] = useState<string | null>(null);
   const [errorClues, setErrorClues] = useState<string[]>([]);
+  const [isStaticPreviewError, setIsStaticPreviewError] = useState(false);
   const [sentResult, setSentResult] = useState<{
     channel: 'smtp' | 'erp_log';
     messageId?: string;
@@ -142,6 +146,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     setErrorMsg(null);
     setErrorHint(null);
     setErrorClues([]);
+    setIsStaticPreviewError(false);
     setSmtpSaveNotice(null);
     setFsOpen(false);
     setFsQuery('');
@@ -180,6 +185,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
             setErrorMsg(err.message);
             setErrorHint(err.actionHint || null);
             setErrorClues(err.debuggingClues || []);
+            setIsStaticPreviewError(err.status === 405 || err.smtpErrorCode === 'HTTP_405');
           }
         }
       })
@@ -286,6 +292,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
     setErrorMsg(null);
     setErrorHint(null);
     setErrorClues([]);
+    setIsStaticPreviewError(false);
     setSmtpSaveNotice(null);
 
     const trimmedUser = smtpUser.trim();
@@ -329,6 +336,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       if (err instanceof SmtpConnectionError) {
         setErrorHint(err.actionHint || null);
         setErrorClues(err.debuggingClues || []);
+        setIsStaticPreviewError(err.status === 405 || err.smtpErrorCode === 'HTTP_405');
       }
     } finally {
       setSmtpSaving(false);
@@ -380,6 +388,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       setVerifyingBeforeReview(true);
       setErrorHint(null);
       setErrorClues([]);
+      setIsStaticPreviewError(false);
       try {
         const updated = await saveAndVerifySmtpConfig({
           host: smtpHost.trim(),
@@ -406,6 +415,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
         if (err instanceof SmtpConnectionError) {
           setErrorHint(err.actionHint || null);
           setErrorClues(err.debuggingClues || []);
+          setIsStaticPreviewError(err.status === 405 || err.smtpErrorCode === 'HTTP_405');
         }
       } finally {
         setVerifyingBeforeReview(false);
@@ -471,9 +481,11 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
       if (err instanceof SmtpConnectionError) {
         setErrorHint(err.actionHint || null);
         setErrorClues(err.debuggingClues || []);
+        setIsStaticPreviewError(err.status === 405 || err.smtpErrorCode === 'HTTP_405');
       } else {
         setErrorHint(null);
         setErrorClues([]);
+        setIsStaticPreviewError(false);
       }
       setConfirmStep(false);
     } finally {
@@ -947,7 +959,7 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
             {errorMsg && (
               <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                <div className="space-y-1">
+                <div className="space-y-1.5 flex-1">
                   <div className="font-medium">{errorMsg}</div>
                   {errorHint && (
                     <div className="text-[11px] text-rose-900">
@@ -961,6 +973,35 @@ export const EmailComposeModal: React.FC<EmailComposeModalProps> = ({
                         <li key={clue}>{clue}</li>
                       ))}
                     </ul>
+                  )}
+                  {isStaticPreviewError && (
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      {getDevelopmentBackendUrl() && (
+                        <a
+                          href={getDevelopmentBackendUrl()!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-md bg-[#14263D] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-slate-800"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          Open Live Backend URL (SMTP Enabled)
+                        </a>
+                      )}
+                      {toEmail.trim() && (
+                        <a
+                          href={buildMailtoFallbackHref({
+                            to: toEmail,
+                            cc: ccEmails,
+                            subject,
+                            body,
+                          })}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#14263D] hover:bg-slate-50"
+                        >
+                          <Mail className="h-3 w-3 text-[#2463EB]" />
+                          Send via Mail App (mailto:)
+                        </a>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>

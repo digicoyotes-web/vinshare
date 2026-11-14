@@ -100,6 +100,29 @@ async function readJsonPayload(res: Response): Promise<{
   }
 }
 
+export function getDevelopmentBackendUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const { hostname, href } = window.location;
+  if (hostname.startsWith('ais-pre-')) {
+    return href.replace('://ais-pre-', '://ais-dev-');
+  }
+  return null;
+}
+
+export function buildMailtoFallbackHref(params: {
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+}): string {
+  const qs = new URLSearchParams();
+  if (params.cc?.trim()) qs.set('cc', params.cc.trim());
+  if (params.subject.trim()) qs.set('subject', params.subject.trim());
+  if (params.body.trim()) qs.set('body', params.body.trim());
+  const query = qs.toString();
+  return `mailto:${encodeURIComponent(params.to.trim())}${query ? `?${query}` : ''}`;
+}
+
 export async function fetchSmtpStatus(): Promise<SmtpStatusDto> {
   const res = await fetch('/api/email/smtp-status');
   const { data, nonJsonDetail } = await readJsonPayload(res);

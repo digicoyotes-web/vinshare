@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  ExternalLink,
   Eye,
   EyeOff,
   History,
@@ -29,6 +30,7 @@ import {
   diagnoseSmtpConnection,
   fetchSmtpLogs,
   fetchSmtpStatus,
+  getDevelopmentBackendUrl,
   resetSmtpConfig,
   saveAndVerifySmtpConfig,
   sendEmailViaSmtp,
@@ -177,12 +179,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
         setSmtpFromName(status.fromName || viteFromName || 'Vinshar Facility Management ERP');
         setSmtpFromEmail(status.fromEmail || status.user || viteFromEmail || viteUser || '');
       })
-      .catch(() => {
+      .catch((err) => {
         if (viteHost) setSmtpHost(viteHost);
         if (Number.isInteger(vitePort) && vitePort > 0 && vitePort <= 65535) setSmtpPort(vitePort);
         if (viteUser) setSmtpUser(viteUser);
         if (viteFromName) setSmtpFromName(viteFromName);
         if (viteFromEmail || viteUser) setSmtpFromEmail(viteFromEmail || viteUser);
+        if (err instanceof SmtpConnectionError && (err.status === 405 || err.smtpErrorCode === 'HTTP_405')) {
+          setSmtpError(err.message);
+          setSmtpActionHint(err.actionHint || null);
+          setSmtpDebugClues(err.debuggingClues || []);
+        }
       });
     refreshSmtpLogs();
   }, [refreshSmtpLogs]);
@@ -1061,6 +1068,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ focusTarget }) => {
                       <Terminal className="h-3 w-3" />
                       Inspect Full Handshake Error in Activity Log
                     </button>
+                  )}
+                  {smtpError.includes('405') && getDevelopmentBackendUrl() && (
+                    <div className="pt-1">
+                      <a
+                        href={getDevelopmentBackendUrl()!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-md bg-[#14263D] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-slate-800"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        Open Live Backend URL (SMTP Enabled)
+                      </a>
+                    </div>
                   )}
                 </div>
               </div>
