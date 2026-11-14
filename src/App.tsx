@@ -3,7 +3,6 @@ import {
   BarChart3,
   Bell,
   Briefcase,
-  Building2,
   CreditCard,
   FileCheck2,
   FileSignature,
@@ -72,9 +71,41 @@ import type {
 } from './types/erp';
 import { calculateCostSheetFinancials, formatInrFull } from './utils/formatters';
 import { buildVirtualDocumentVault } from './utils/virtualFileSystem';
+import {
+  syncOrSeedSupabaseDataset,
+  upsertErpRecord,
+  type ErpTableName,
+} from './services/supabase';
 
 const EMAILS_STORAGE_KEY = 'fm_erp_project_emails_v1';
 const SNAPSHOTS_STORAGE_KEY = 'fm_erp_doc_snapshots_v1';
+const ERP_STORAGE_PREFIX = 'fm_erp_table_v1_';
+
+function loadStoredTable<T>(table: ErpTableName, fallback: T[]): T[] {
+  try {
+    const raw =
+      typeof localStorage !== 'undefined'
+        ? localStorage.getItem(`${ERP_STORAGE_PREFIX}${table}`)
+        : null;
+    if (raw) {
+      const parsed = JSON.parse(raw) as T[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {
+    // Ignore storage read error
+  }
+  return fallback;
+}
+
+function saveStoredTable<T>(table: ErpTableName, rows: T[]): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(`${ERP_STORAGE_PREFIX}${table}`, JSON.stringify(rows));
+    }
+  } catch {
+    // Ignore storage quota error
+  }
+}
 
 const INITIAL_PROJECT_EMAILS: ProjectEmailRecord[] = [
   {
@@ -141,16 +172,30 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Core ERP State
-  const [clients, setClients] = useState<ClientRecord[]>(INITIAL_CLIENTS);
-  const [opportunities, setOpportunities] = useState<OpportunityRecord[]>(INITIAL_OPPORTUNITIES);
-  const [proposals, setProposals] = useState<ProposalRecord[]>(INITIAL_PROPOSALS);
-  const [attritionRecords, setAttritionRecords] = useState<AttritionRecord[]>(INITIAL_ATTRITION);
-  const [lois, setLois] = useState<LoiRecord[]>(INITIAL_LOIS);
-  const [agreements, setAgreements] = useState<AgreementRecord[]>(INITIAL_AGREEMENTS);
-  const [projects, setProjects] = useState<ProjectRecord[]>(INITIAL_PROJECTS);
-  const [invoices, setInvoices] = useState<InvoiceRecord[]>(INITIAL_INVOICES);
-  const [payments, setPayments] = useState<PaymentRecord[]>(INITIAL_PAYMENTS);
+  // Core ERP State (hydrated from Supabase when configured, cached in localStorage)
+  const [clients, setClients] = useState<ClientRecord[]>(() => loadStoredTable('clients', INITIAL_CLIENTS));
+  const [opportunities, setOpportunities] = useState<OpportunityRecord[]>(() =>
+    loadStoredTable('opportunities', INITIAL_OPPORTUNITIES)
+  );
+  const [proposals, setProposals] = useState<ProposalRecord[]>(() =>
+    loadStoredTable('proposals', INITIAL_PROPOSALS)
+  );
+  const [attritionRecords, setAttritionRecords] = useState<AttritionRecord[]>(() =>
+    loadStoredTable('attrition_records', INITIAL_ATTRITION)
+  );
+  const [lois, setLois] = useState<LoiRecord[]>(() => loadStoredTable('lois', INITIAL_LOIS));
+  const [agreements, setAgreements] = useState<AgreementRecord[]>(() =>
+    loadStoredTable('agreements', INITIAL_AGREEMENTS)
+  );
+  const [projects, setProjects] = useState<ProjectRecord[]>(() =>
+    loadStoredTable('projects', INITIAL_PROJECTS)
+  );
+  const [invoices, setInvoices] = useState<InvoiceRecord[]>(() =>
+    loadStoredTable('invoices', INITIAL_INVOICES)
+  );
+  const [payments, setPayments] = useState<PaymentRecord[]>(() =>
+    loadStoredTable('payments', INITIAL_PAYMENTS)
+  );
   const [users, setUsers] = useState<UserAccount[]>(INITIAL_USERS);
   const [activeUserId, setActiveUserId] = useState<string>(INITIAL_USERS[0].id);
 
@@ -209,6 +254,52 @@ export default function App() {
     }
   }, [docSnapshots]);
 
+  // Persist local table mirrors for instant reload resilience
+  useEffect(() => { saveStoredTable('clients', clients); }, [clients]);
+  useEffect(() => { saveStoredTable('opportunities', opportunities); }, [opportunities]);
+  useEffect(() => { saveStoredTable('proposals', proposals); }, [proposals]);
+  useEffect(() => { saveStoredTable('attrition_records', attritionRecords); }, [attritionRecords]);
+  useEffect(() => { saveStoredTable('lois', lois); }, [lois]);
+  useEffect(() => { saveStoredTable('agreements', agreements); }, [agreements]);
+  useEffect(() => { saveStoredTable('projects', projects); }, [projects]);
+  useEffect(() => { saveStoredTable('invoices', invoices); }, [invoices]);
+  useEffect(() => { saveStoredTable('payments', payments); }, [payments]);
+
+  // Hydrate or seed all ERP tables from Supabase when env vars are present
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const remote = await syncOrSeedSupabaseDataset({
+        clients: INITIAL_CLIENTS,
+        opportunities: INITIAL_OPPORTUNITIES,
+        proposals: INITIAL_PROPOSALS,
+        attritionRecords: INITIAL_ATTRITION,
+        lois: INITIAL_LOIS,
+        agreements: INITIAL_AGREEMENTS,
+        projects: INITIAL_PROJECTS,
+        invoices: INITIAL_INVOICES,
+        payments: INITIAL_PAYMENTS,
+        projectEmails: INITIAL_PROJECT_EMAILS,
+        docSnapshots: [],
+      });
+      if (!active || !remote) return;
+      if (remote.clients) setClients(remote.clients);
+      if (remote.opportunities) setOpportunities(remote.opportunities);
+      if (remote.proposals) setProposals(remote.proposals);
+      if (remote.attritionRecords) setAttritionRecords(remote.attritionRecords);
+      if (remote.lois) setLois(remote.lois);
+      if (remote.agreements) setAgreements(remote.agreements);
+      if (remote.projects) setProjects(remote.projects);
+      if (remote.invoices) setInvoices(remote.invoices);
+      if (remote.payments) setPayments(remote.payments);
+      if (remote.projectEmails) setProjectEmails(remote.projectEmails);
+      if (remote.docSnapshots) setDocSnapshots(remote.docSnapshots);
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const activeUser = useMemo(
     () => users.find((u) => u.id === activeUserId) || users[0],
     [users, activeUserId]
@@ -249,22 +340,25 @@ export default function App() {
     refreshSmsLedger();
   }, [refreshSmsLedger]);
 
-  // Propagate SMS verification success to the corresponding ERP entity
+  // Propagate SMS verification success to the corresponding ERP entity + Supabase
   const handleEntityVerified = useCallback((entityId: string, _phone: string) => {
     const nowIso = new Date().toISOString();
 
     if (entityId.startsWith('CLI-')) {
       setClients((prev) =>
-        prev.map((c) =>
-          c.id === entityId ? { ...c, mobileVerified: true, mobileVerifiedAt: nowIso } : c
-        )
+        prev.map((c) => {
+          if (c.id !== entityId) return c;
+          const updated = { ...c, mobileVerified: true, mobileVerifiedAt: nowIso };
+          void upsertErpRecord('clients', updated);
+          return updated;
+        })
       );
     } else if (entityId.startsWith('PROP-')) {
       const [propId, version] = entityId.split(':');
       setProposals((prev) =>
         prev.map((p) => {
           if (p.id !== propId) return p;
-          return {
+          const updated: ProposalRecord = {
             ...p,
             versions: p.versions.map((v) =>
               v.version === (version || p.currentVersion)
@@ -278,58 +372,78 @@ export default function App() {
                 : v
             ),
           };
+          void upsertErpRecord('proposals', updated);
+          return updated;
         })
       );
     } else if (entityId.startsWith('LOI-')) {
       setLois((prev) =>
-        prev.map((l) =>
-          l.id === entityId
-            ? { ...l, status: 'Accepted', clientSmsAccepted: true, clientSmsAcceptedAt: nowIso }
-            : l
-        )
+        prev.map((l) => {
+          if (l.id !== entityId) return l;
+          const updated: LoiRecord = {
+            ...l,
+            status: 'Accepted',
+            clientSmsAccepted: true,
+            clientSmsAcceptedAt: nowIso,
+          };
+          void upsertErpRecord('lois', updated);
+          return updated;
+        })
       );
     } else if (entityId.startsWith('AGR-')) {
       setAgreements((prev) =>
-        prev.map((a) =>
-          a.id === entityId
-            ? {
-                ...a,
-                status: 'Executed',
-                companySigned: true,
-                clientSigned: true,
-                smsExecutionVerified: true,
-                smsExecutionVerifiedAt: nowIso,
-              }
-            : a
-        )
+        prev.map((a) => {
+          if (a.id !== entityId) return a;
+          const updated: AgreementRecord = {
+            ...a,
+            status: 'Executed',
+            companySigned: true,
+            clientSigned: true,
+            smsExecutionVerified: true,
+            smsExecutionVerifiedAt: nowIso,
+          };
+          void upsertErpRecord('agreements', updated);
+          return updated;
+        })
       );
     } else if (entityId.startsWith('PRJ-')) {
       setProjects((prev) =>
-        prev.map((p) =>
-          p.id === entityId
-            ? { ...p, closingStatus: 'Project Activated', activationSmsSent: true }
-            : p
-        )
+        prev.map((p) => {
+          if (p.id !== entityId) return p;
+          const updated: ProjectRecord = {
+            ...p,
+            closingStatus: 'Project Activated',
+            activationSmsSent: true,
+          };
+          void upsertErpRecord('projects', updated);
+          return updated;
+        })
       );
     } else if (entityId.startsWith('INV-')) {
       setInvoices((prev) =>
-        prev.map((inv) =>
-          inv.id === entityId
-            ? {
-                ...inv,
-                status: inv.paidAmount >= inv.totalAmount ? 'Paid' : 'Issued',
-                financeSmsVerified: true,
-              }
-            : inv
-        )
+        prev.map((inv) => {
+          if (inv.id !== entityId) return inv;
+          const updated: InvoiceRecord = {
+            ...inv,
+            status: inv.paidAmount >= inv.totalAmount ? 'Paid' : 'Issued',
+            financeSmsVerified: true,
+          };
+          void upsertErpRecord('invoices', updated);
+          return updated;
+        })
       );
     } else if (entityId.startsWith('PAY-')) {
       setPayments((prev) =>
-        prev.map((pay) =>
-          pay.id === entityId
-            ? { ...pay, smsConfirmationSent: true, smsConfirmedVerified: true }
-            : pay
-        )
+        prev.map((pay) => {
+          if (pay.id !== entityId) return pay;
+          const updated: PaymentRecord = {
+            ...pay,
+            smsConfirmationSent: true,
+            smsConfirmedVerified: true,
+          };
+          void upsertErpRecord('payments', updated);
+          return updated;
+        })
       );
     } else if (entityId.startsWith('USR-')) {
       setUsers((prev) =>
@@ -363,30 +477,38 @@ export default function App() {
     return results.slice(0, 6);
   }, [globalQuery, clients, proposals, invoices]);
 
-  // ERP workflow handlers
+  // ERP workflow handlers (optimistic UI + Supabase CRUD persistence)
   const handleAddClient = (client: ClientRecord, opportunity?: OpportunityRecord) => {
     setClients((prev) => [client, ...prev]);
+    void upsertErpRecord('clients', client);
     if (opportunity) {
       setOpportunities((prev) => [opportunity, ...prev]);
+      void upsertErpRecord('opportunities', opportunity);
     }
   };
 
   const handleSaveProposalVersion = (proposalId: string, updated: ProposalVersion) => {
     setProposals((prev) =>
-      prev.map((p) =>
-        p.id === proposalId
-          ? {
-              ...p,
-              versions: p.versions.map((v) => (v.version === updated.version ? updated : v)),
-            }
-          : p
-      )
+      prev.map((p) => {
+        if (p.id !== proposalId) return p;
+        const nextProposal: ProposalRecord = {
+          ...p,
+          versions: p.versions.map((v) => (v.version === updated.version ? updated : v)),
+        };
+        void upsertErpRecord('proposals', nextProposal);
+        return nextProposal;
+      })
     );
   };
 
   const handleSelectProposalVersion = (proposalId: string, version: string) => {
     setProposals((prev) =>
-      prev.map((p) => (p.id === proposalId ? { ...p, currentVersion: version } : p))
+      prev.map((p) => {
+        if (p.id !== proposalId) return p;
+        const nextProposal: ProposalRecord = { ...p, currentVersion: version };
+        void upsertErpRecord('proposals', nextProposal);
+        return nextProposal;
+      })
     );
   };
 
@@ -407,21 +529,25 @@ export default function App() {
           status: 'Draft',
           smsVerifiedApproval: false,
         };
-        return {
+        const nextProposal: ProposalRecord = {
           ...p,
           currentVersion: nextVersionLabel,
           versions: [...p.versions, cloned],
         };
+        void upsertErpRecord('proposals', nextProposal);
+        return nextProposal;
       })
     );
   };
 
   const handleCreateProposal = (proposal: ProposalRecord) => {
     setProposals((prev) => [proposal, ...prev]);
+    void upsertErpRecord('proposals', proposal);
   };
 
   const handleUpdateInvoice = (updatedInvoice: InvoiceRecord) => {
     setInvoices((prev) => prev.map((inv) => (inv.id === updatedInvoice.id ? updatedInvoice : inv)));
+    void upsertErpRecord('invoices', updatedInvoice);
   };
 
   const handleSaveInvoiceSnapshot = (invoice: InvoiceRecord, note?: string) => {
@@ -440,6 +566,7 @@ export default function App() {
       statusLabel: invoice.status,
     };
     setDocSnapshots((prev) => [snap, ...prev]);
+    void upsertErpRecord('doc_snapshots', snap);
   };
 
   const handleSaveProjectSnapshot = (project: ProjectRecord, note?: string) => {
@@ -459,6 +586,7 @@ export default function App() {
       statusLabel: project.closingStatus,
     };
     setDocSnapshots((prev) => [snap, ...prev]);
+    void upsertErpRecord('doc_snapshots', snap);
   };
 
   const handleSendProjectEmail = (
@@ -486,21 +614,23 @@ export default function App() {
       sentBy: activeUser.name,
     };
     setProjectEmails((prev) => [newRecord, ...prev]);
+    void upsertErpRecord('project_emails', newRecord);
 
     if (ctx.entityType === 'proposal') {
       setProposals((prev) =>
-        prev.map((p) =>
-          p.id === ctx.entityId
-            ? {
-                ...p,
-                versions: p.versions.map((v) =>
-                  v.version === p.currentVersion && v.status === 'Draft'
-                    ? { ...v, status: 'Shared with Client' }
-                    : v
-                ),
-              }
-            : p
-        )
+        prev.map((p) => {
+          if (p.id !== ctx.entityId) return p;
+          const nextProposal: ProposalRecord = {
+            ...p,
+            versions: p.versions.map((v) =>
+              v.version === p.currentVersion && v.status === 'Draft'
+                ? { ...v, status: 'Shared with Client' }
+                : v
+            ),
+          };
+          void upsertErpRecord('proposals', nextProposal);
+          return nextProposal;
+        })
       );
     }
   };
@@ -525,9 +655,15 @@ export default function App() {
       sentAt: new Date().toISOString(),
       sentBy: email.clientName,
     };
+    void upsertErpRecord('project_emails', replyRecord);
     setProjectEmails((prev) => [
       replyRecord,
-      ...prev.map((item) => (item.id === email.id ? { ...item, status: 'Replied' as const } : item)),
+      ...prev.map((item) => {
+        if (item.id !== email.id) return item;
+        const updated = { ...item, status: 'Replied' as const };
+        void upsertErpRecord('project_emails', updated);
+        return updated;
+      }),
     ]);
   };
 
@@ -566,11 +702,13 @@ export default function App() {
             ? { ...v, status: 'Superseded' as const }
             : v
         );
-        return {
+        const nextProposal: ProposalRecord = {
           ...p,
           currentVersion: nextVersionLabel,
           versions: [...updatedVersions, nextVersion],
         };
+        void upsertErpRecord('proposals', nextProposal);
+        return nextProposal;
       })
     );
   };
@@ -608,6 +746,7 @@ export default function App() {
       clientSmsAccepted: false,
     };
     setLois((prev) => [nextLoi, ...prev]);
+    void upsertErpRecord('lois', nextLoi);
     setActiveNav('loi');
   };
 
@@ -641,28 +780,31 @@ export default function App() {
       ],
     };
     setAgreements((prev) => [newAgr, ...prev]);
+    void upsertErpRecord('agreements', newAgr);
     setActiveNav('agreements');
   };
 
   const handleToggleChecklist = (projectId: string, itemId: string) => {
     setProjects((prev) =>
-      prev.map((p) =>
-        p.id === projectId
-          ? {
-              ...p,
-              checklist: p.checklist.map((item) =>
-                item.id === itemId
-                  ? { ...item, completed: !item.completed, verifiedBy: activeUser.name }
-                  : item
-              ),
-            }
-          : p
-      )
+      prev.map((p) => {
+        if (p.id !== projectId) return p;
+        const nextProject: ProjectRecord = {
+          ...p,
+          checklist: p.checklist.map((item) =>
+            item.id === itemId
+              ? { ...item, completed: !item.completed, verifiedBy: activeUser.name }
+              : item
+          ),
+        };
+        void upsertErpRecord('projects', nextProject);
+        return nextProject;
+      })
     );
   };
 
   const handleRecordPayment = (payment: PaymentRecord) => {
     setPayments((prev) => [payment, ...prev]);
+    void upsertErpRecord('payments', payment);
     setInvoices((prev) =>
       prev.map((inv) => {
         if (inv.id !== payment.invoiceId) return inv;
@@ -670,13 +812,15 @@ export default function App() {
         const tds = inv.tdsAmount + payment.tdsDeducted;
         const cred = inv.creditNoteAmount + payment.creditAdjustment;
         const settled = paid + tds + cred;
-        return {
+        const nextInvoice: InvoiceRecord = {
           ...inv,
           paidAmount: paid,
           tdsAmount: tds,
           creditNoteAmount: cred,
           status: settled >= inv.totalAmount ? 'Paid' : 'Partially Paid',
         };
+        void upsertErpRecord('invoices', nextInvoice);
+        return nextInvoice;
       })
     );
   };
@@ -702,23 +846,34 @@ export default function App() {
           mobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         } ${sidebarOpen ? 'w-64' : 'w-[72px]'}`}
       >
-        {/* Brand Header */}
-        <div className="flex items-center justify-between gap-2.5 px-4 py-4 border-b border-white/10">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#2463EB] text-white shrink-0">
-              <Building2 className="h-5 w-5" />
-            </div>
-            {sidebarOpen && (
-              <div className="min-w-0">
-                <div className="text-sm font-bold leading-tight truncate">Facility Management ERP</div>
-                <div className="text-[11px] text-slate-300 truncate">Operations • Commercial • Finance</div>
+        {/* Brand Header with Vinshar Logo */}
+        <div className="flex items-center justify-between gap-2 px-3.5 py-3 border-b border-white/10">
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+            {sidebarOpen ? (
+              <div className="w-full rounded-lg bg-white px-2.5 py-1.5 shadow-xs">
+                <img
+                  src="/assets/aistudio/vinsharelogo_e0a967bd.png"
+                  alt="Vinshar Integrated Services Pvt. Ltd."
+                  className="h-9 w-auto object-contain"
+                />
+                <div className="text-[10px] font-semibold tracking-wide text-slate-500 uppercase mt-0.5 pl-0.5">
+                  Facility Management ERP
+                </div>
+              </div>
+            ) : (
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white p-1 overflow-hidden shrink-0">
+                <img
+                  src="/assets/aistudio/vinsharelogo_e0a967bd.png"
+                  alt="Vinshar Logo"
+                  className="h-8 w-8 object-cover object-left"
+                />
               </div>
             )}
           </div>
           <button
             type="button"
             onClick={() => setMobileMenuOpen(false)}
-            className="lg:hidden text-slate-300 hover:text-white"
+            className="lg:hidden text-slate-300 hover:text-white shrink-0"
           >
             <X className="h-5 w-5" />
           </button>
@@ -966,7 +1121,10 @@ export default function App() {
               clients={clients}
               proposals={proposals}
               attritionRecords={attritionRecords}
-              onAddAttrition={(r) => setAttritionRecords((prev) => [r, ...prev])}
+              onAddAttrition={(r) => {
+                setAttritionRecords((prev) => [r, ...prev]);
+                void upsertErpRecord('attrition_records', r);
+              }}
               onCreateRevision={handleCreateRevision}
             />
           )}
@@ -975,7 +1133,14 @@ export default function App() {
             <LoiView
               lois={lois}
               onUpdateLoiStatus={(id, status: LoiStatus) =>
-                setLois((prev) => prev.map((l) => (l.id === id ? { ...l, status } : l)))
+                setLois((prev) =>
+                  prev.map((l) => {
+                    if (l.id !== id) return l;
+                    const updated = { ...l, status };
+                    void upsertErpRecord('lois', updated);
+                    return updated;
+                  })
+                )
               }
               onTriggerSmsVerify={setSmsVerifyContext}
               onDraftAgreementFromLoi={handleDraftAgreementFromLoi}
@@ -987,14 +1152,15 @@ export default function App() {
               agreements={agreements}
               onUpdateClause={(agrId, clauseId, content) =>
                 setAgreements((prev) =>
-                  prev.map((a) =>
-                    a.id === agrId
-                      ? {
-                          ...a,
-                          clauses: a.clauses.map((c) => (c.id === clauseId ? { ...c, content } : c)),
-                        }
-                      : a
-                  )
+                  prev.map((a) => {
+                    if (a.id !== agrId) return a;
+                    const updated = {
+                      ...a,
+                      clauses: a.clauses.map((c) => (c.id === clauseId ? { ...c, content } : c)),
+                    };
+                    void upsertErpRecord('agreements', updated);
+                    return updated;
+                  })
                 )
               }
               onTriggerSmsVerify={setSmsVerifyContext}
@@ -1024,7 +1190,10 @@ export default function App() {
               projects={projects}
               invoices={invoices}
               invoiceSnapshots={docSnapshots.filter((s) => s.entityType === 'invoice')}
-              onCreateInvoice={(inv) => setInvoices((prev) => [inv, ...prev])}
+              onCreateInvoice={(inv) => {
+                setInvoices((prev) => [inv, ...prev]);
+                void upsertErpRecord('invoices', inv);
+              }}
               onUpdateInvoice={handleUpdateInvoice}
               onSaveInvoiceSnapshot={handleSaveInvoiceSnapshot}
               onTriggerSmsVerify={setSmsVerifyContext}

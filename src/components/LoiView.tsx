@@ -111,6 +111,11 @@ export const LoiView: React.FC<LoiViewProps> = ({
           {/* Corporate Addressee & Actions */}
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-4">
             <div>
+              <img
+                src="/assets/aistudio/vinsharelogo_e0a967bd.png"
+                alt={COMPANY_PROFILE.legalName}
+                className="h-8 w-auto object-contain mb-2"
+              />
               <div className="flex items-center gap-2">
                 <FileCheck2 className="h-4 w-4 text-[#2463EB]" />
                 <span className="font-mono text-xs font-semibold text-[#2463EB]">{active.reference}</span>

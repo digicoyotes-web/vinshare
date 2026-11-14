@@ -443,10 +443,12 @@ export const ProposalsCostSheetView: React.FC<ProposalsCostSheetViewProps> = ({
           {/* Corporate Letterhead */}
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 border-b border-slate-200 pb-5">
             <div>
-              <div className="text-[11px] font-bold tracking-wider uppercase text-[#2463EB]">
-                {COMPANY_PROFILE.legalName}
-              </div>
-              <p className="text-[11px] text-slate-500 mt-1 max-w-md leading-relaxed">
+              <img
+                src="/assets/aistudio/vinsharelogo_e0a967bd.png"
+                alt={COMPANY_PROFILE.legalName}
+                className="h-11 w-auto object-contain mb-2"
+              />
+              <p className="text-[11px] text-slate-500 max-w-md leading-relaxed">
                 Corporate Office: {COMPANY_PROFILE.corporateOffice}
               </p>
               <div className="text-[11px] text-slate-500 mt-1">
